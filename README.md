@@ -78,6 +78,8 @@ docker compose build
 
 # Copy the sample config and edit it, including the [wago] section.
 cp config.sample.toml config.toml
+# Optional: choose the host bind address/port used by the reverse proxy.
+cp .env.example .env
 
 # Run the services in the background.
 docker compose up -d
@@ -88,7 +90,7 @@ docker exec -it libredesk_app ./libredesk --set-system-user-password
 
 The compose file uses the local `libremitu:local` image. To rebuild after code changes,
 run `docker compose build --no-cache && docker compose up -d`.
-See [docs/wago-integration.md](docs/wago-integration.md) for the WAGO env and webhook setup.
+See [docs/deployment.md](docs/deployment.md) for the full deployment guide and [docs/wago-integration.md](docs/wago-integration.md) for the WAGO env and webhook setup.
 
 Go to `http://localhost:9000` and login with username `System` and the password you set using the `--set-system-user-password` command.
 

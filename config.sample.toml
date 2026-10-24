@@ -16,6 +16,8 @@ encryption_key = "your-32-char-random-string-here!"
 # HTTP server.
 [app.server]
 # Address to bind the HTTP server to.
+# Behind a reverse proxy, 127.0.0.1:9001 keeps the app off the public interface.
+# The port here must match the container target port in docker-compose.yml.
 address = "0.0.0.0:9000"
 # Unix socket path (leave empty to use TCP address instead)
 socket = ""

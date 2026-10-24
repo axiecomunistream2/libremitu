@@ -1,5 +1,8 @@
 # WAGO integration
 
+For server installation, Docker, systemd, reverse proxy, backups, and upgrades,
+see [deployment.md](deployment.md).
+
 This fork removes libredesk's Meta Cloud API integration and runs the `whatsapp`
 channel against a single [WAGO](https://github.com/aldinokemal/go-whatsapp-web-multidevice)
 device. WAGO is a separate production service; this repository only contains the

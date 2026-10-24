@@ -9,8 +9,11 @@ services:
     container_name: libredesk_app
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      # Host bind address and port are configurable for reverse proxies.
+      # Example: LIBREDESK_BIND_ADDR=127.0.0.1 LIBREDESK_PORT=9001
+      - "${LIBREDESK_BIND_ADDR:-127.0.0.1}:${LIBREDESK_PORT:-9000}:${LIBREDESK_CONTAINER_PORT:-9000}"
     environment:
+      LIBREDESK_APP__SERVER__ADDRESS: "0.0.0.0:${LIBREDESK_CONTAINER_PORT:-9000}"
       # If the password is set during first docker-compose up, the system user password will be set to this value.
       # You can always set system user password later by running `docker exec -it libredesk_app ./libredesk --set-system-user-password`.
       LIBREDESK_SYSTEM_USER_PASSWORD: ${LIBREDESK_SYSTEM_USER_PASSWORD:-}
