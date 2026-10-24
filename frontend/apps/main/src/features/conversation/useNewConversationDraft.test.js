@@ -26,9 +26,9 @@ describe('new conversation draft storage', () => {
     expect(hasNewConversationDraft(localStorage)).toBe(true)
   })
 
-  it('round trips partial template parameters separately from the email draft', () => {
+  it('round trips partial WhatsApp content separately from the email draft', () => {
     draftFor('email').value = { values: { content: '<p>Email</p>' } }
-    const value = { inboxId: '1', templateId: 9, templateParams: { 'body:1': 'Customer A', 'header:1': '' } }
+    const value = { inboxId: '1', content: 'Hello Customer A' }
     draftFor('whatsapp').value = value
     expect(draftFor('whatsapp').value).toEqual(value)
     expect(draftFor('email').value.values.content).toBe('<p>Email</p>')
@@ -46,7 +46,7 @@ describe('new conversation draft storage', () => {
 
   it('discards both channels without recreating their drafts after unmount', async () => {
     draftFor('email').value = { values: { subject: 'Email' } }
-    draftFor('whatsapp').value = { templateId: 9 }
+    draftFor('whatsapp').value = { content: 'Hello' }
     clearNewConversationDrafts(localStorage)
     scopes.forEach((scope) => scope.stop())
     await nextTick()

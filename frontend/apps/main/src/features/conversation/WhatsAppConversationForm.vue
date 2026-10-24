@@ -147,29 +147,13 @@
     </Alert>
 
     <div v-else class="flex-1 flex flex-col min-h-0 px-3 pt-3">
-      <p class="text-sm text-muted-foreground mb-2">{{ $t('globals.terms.template', 1) }}</p>
-
-      <template v-if="inboxId">
-        <WhatsAppTemplatePicker
-          fill
-          class="flex-1"
-          :approved-templates="approvedTemplates"
-          :selected-template="selectedTemplate"
-          :template-params="templateParams"
-          :placeholders="placeholders"
-          :url-button-params="urlButtonParams"
-          :rendered-preview="renderedPreview"
-          :is-fetching="isFetchingTemplates"
-          @pick="pickTemplate"
-          @back="selectedTemplate = null"
-          @update:param="(key, v) => (templateParams[key] = v)"
-        />
-      </template>
+      <p class="text-sm text-muted-foreground mb-2">{{ $t('globals.terms.message', 1) }}</p>
+      <Textarea v-model="content" rows="6" :placeholder="$t('globals.terms.typeMessage')" />
     </div>
 
     <div v-if="!existingConversation?.exists" class="flex justify-end px-3 py-2 shrink-0">
       <Button type="submit" :disabled="!canSubmit || loading" :isLoading="loading">
-        {{ $t('globals.messages.sendTemplate') }}
+        {{ $t('globals.messages.send') }}
       </Button>
     </div>
   </form>
@@ -183,6 +167,7 @@ import { useRouter } from 'vue-router'
 import { Alert, AlertDescription } from '@shared-ui/components/ui/alert'
 import { Button } from '@shared-ui/components/ui/button'
 import { Input } from '@shared-ui/components/ui/input'
+import { Textarea } from '@shared-ui/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -200,8 +185,6 @@ import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { useInboxStore } from '@main/stores/inbox'
 import { useUserStore } from '@main/stores/user'
 import { countryCallingOptions as allCountries } from '@shared-ui/constants/countries.js'
-import { useWhatsAppTemplatePicker } from './useWhatsAppTemplatePicker.js'
-import WhatsAppTemplatePicker from './WhatsAppTemplatePicker.vue'
 import { useContactSearch } from './useContactSearch.js'
 import ContactSearchResults from './ContactSearchResults.vue'
 import api from '@/api'
@@ -227,19 +210,6 @@ const router = useRouter()
 const emitter = useEmitter()
 const inboxStore = useInboxStore()
 const userStore = useUserStore()
-
-const {
-  selectedTemplate,
-  templateParams,
-  approvedTemplates,
-  placeholders,
-  urlButtonParams,
-  allParamsFilled,
-  renderedPreview,
-  isFetchingTemplates,
-  pickTemplate,
-  fetchTemplates
-} = useWhatsAppTemplatePicker()
 
 const inboxId = ref('')
 const teamId = ref(null)
@@ -268,8 +238,8 @@ const { searchResults, highlightedIndex, handleSearchContacts, handleSearchKeydo
   })
 
 const draft = useNewConversationDraft('whatsapp')
-let templateDraft = draft.value
-const DRAFT_FIELDS = { inboxId, teamId, agentId, phoneCountryCode, phoneNumber, firstName, lastName }
+const content = ref('')
+const DRAFT_FIELDS = { inboxId, teamId, agentId, phoneCountryCode, phoneNumber, firstName, lastName, content }
 
 onMounted(() => {
   if (draft.value) {
@@ -283,22 +253,11 @@ onMounted(() => {
 
 defineExpose({ focus: () => phoneInputRef.value?.$el?.focus() })
 
-watch(inboxId, (id) => {
-  const selection = templateDraft?.inboxId === id
-    ? { templateId: templateDraft.templateId, params: templateDraft.templateParams }
-    : {}
-  templateDraft = null
-  fetchTemplates(id, selection)
-})
-
-watch([selectedContact, ...Object.values(DRAFT_FIELDS), selectedTemplate, templateParams, isFetchingTemplates], () => {
-  if (isFetchingTemplates.value) return
-  const hasContent = selectedTemplate.value || [phoneNumber, firstName, lastName].some((f) => f.value?.trim())
+watch([selectedContact, ...Object.values(DRAFT_FIELDS)], () => {
+  const hasContent = [phoneNumber, firstName, lastName, content].some((f) => f.value?.trim())
   draft.value = hasContent
     ? {
         contact: selectedContact.value,
-        templateId: selectedTemplate.value?.id ?? null,
-        templateParams: { ...templateParams },
         ...Object.fromEntries(Object.entries(DRAFT_FIELDS).map(([k, f]) => [k, f.value]))
       }
     : null
@@ -353,8 +312,7 @@ const hasContact = computed(() => {
 const canSubmit = computed(
   () =>
     !!inboxId.value &&
-    !!selectedTemplate.value &&
-    allParamsFilled.value &&
+    content.value.trim() !== '' &&
     hasContact.value &&
     !existingConversation.value?.exists
 )
@@ -379,8 +337,7 @@ const createConversation = async () => {
       inbox_id: Number(inboxId.value),
       team_id: teamId.value && teamId.value !== 'none' ? Number(teamId.value) : null,
       agent_id: agentId.value && agentId.value !== 'none' ? Number(agentId.value) : null,
-      whatsapp_template_id: selectedTemplate.value.id,
-      whatsapp_template_params: { ...templateParams }
+      content: content.value
     }
     if (selectedContact.value) {
       payload.contact_id = selectedContact.value.id

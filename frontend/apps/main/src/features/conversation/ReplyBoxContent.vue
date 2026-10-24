@@ -202,7 +202,6 @@
       class="mt-2"
       :isFullscreen="isFullscreen"
       :isWhatsApp="isWhatsAppReply"
-      :showWhatsAppTemplate="isWhatsAppReply"
       :handleFileUpload="handleFileUpload"
       :isSending="isSending"
       :enableSend="enableSend"
@@ -231,7 +230,7 @@ import { Maximize2, Minimize2, Minus, X } from 'lucide-vue-next'
 import Editor from '@main/components/editor/ConversationEditor.vue'
 import { hasInlineImage, hasPendingInlineUpload } from '@main/composables/useInlineImageUpload'
 import { useConversationStore } from '@main/stores/conversation'
-import { WHATSAPP_CHANNEL } from '@main/features/conversation/whatsappTemplate'
+const WHATSAPP_CHANNEL = 'whatsapp'
 import { useIsComposerCramped } from '@main/composables/useIsComposerCramped'
 import { Input } from '@shared-ui/components/ui/input'
 import { Button } from '@shared-ui/components/ui/button'

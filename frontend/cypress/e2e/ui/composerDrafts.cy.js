@@ -6,16 +6,10 @@ const emailDraft = {
     cc: '', bcc: '', first_name: 'Customer A', last_name: ''
   }, contact: null
 }
-const template = {
-  id: 71, name: 'draft_template', language: 'en', status: 'APPROVED',
-  component_types: ['HEADER', 'BODY', 'BUTTONS'], header_type: 'TEXT',
-  header_content: 'Order {{1}}', body_content: 'Hello {{1}}',
-  buttons: [{ type: 'URL', text: 'Track', url: 'https://example.com/{{1}}' }]
-}
 const whatsappDraft = {
   inboxId: '902', teamId: null, agentId: 'none', phoneCountryCode: 'IN',
   phoneNumber: '9000000000', firstName: 'Customer A', lastName: '', contact: null,
-  templateId: 71, templateParams: { 'body:1': 'Customer A', 'header:1': '123', button_url_0: 'order-123' }
+  content: 'Hello Customer A'
 }
 const expand = () => panel().find('header').contains('button', 'New conversation').click()
 const visitDraft = (channel = 'email', draft = emailDraft, path = '/inboxes/assigned') => {
@@ -45,7 +39,6 @@ describe('Composer drafts', () => {
       { id: 903, name: 'Other WhatsApp inbox', channel: 'whatsapp' }
     ] } })
     cy.intercept('GET', '**/api/v1/contacts/search*', { body: { data: [] } })
-    cy.intercept('GET', '**/api/v1/whatsapp/templates*', { delay: 200, body: { data: [template] } }).as('templates')
     cy.intercept('POST', '**/api/v1/conversations', { body: { data: { uuid: '' } } }).as('send')
   })
 
@@ -151,66 +144,26 @@ describe('Composer drafts', () => {
     cy.wait('@send').its('request.body.cc').should('deep.eq', ['copy@example.com'])
   })
 
-  it('persists a template selection before a recipient is entered', () => {
-    visitDraft('whatsapp', { inboxId: '902', templateId: null, templateParams: {} })
-    cy.wait('@templates')
-    panel().contains('button', 'draft_template').click()
-    panel().find('input.col-span-2').eq(0).type('Customer A')
+  it('persists WhatsApp content before a recipient is entered', () => {
+    visitDraft('whatsapp', { inboxId: '902', content: '' })
+    panel().find('textarea').type('Hello Customer A')
     checkSaved('WhatsApp', (draft) => {
-      expect(draft.templateId).to.eq(71)
-      expect(draft.templateParams['body:1']).to.eq('Customer A')
+      expect(draft.content).to.eq('Hello Customer A')
     })
     reloadDraft()
-    cy.wait('@templates')
-    panel().contains('Hello Customer A').should('be.visible')
+    panel().find('textarea').should('have.value', 'Hello Customer A')
     panel().find('button[type="submit"]:visible').should('be.disabled')
-    panel().contains('button', /^Back$/).click()
-    checkSaved('WhatsApp', (draft) => expect(draft).to.eq(null))
   })
 
-  it('restores the WhatsApp template and all parameter types across reloads', () => {
+  it('restores WhatsApp content across reloads and sends it', () => {
     visitDraft('whatsapp', whatsappDraft)
-    cy.wait('@templates')
-    panel().contains('Hello Customer A').should('be.visible')
-    panel().find('input.col-span-2').eq(0).clear().type('Customer B')
-    checkSaved('WhatsApp', (draft) => expect(draft.templateParams['body:1']).to.eq('Customer B'))
-    reloadDraft()
-    cy.wait('@templates')
-    panel().contains('Hello Customer B').should('be.visible')
-    panel().find('input.col-span-2').then(($inputs) => {
-      expect([...$inputs].map((input) => input.value)).to.deep.eq(['Customer B', '123', 'order-123'])
-    })
+    panel().find('textarea').should('have.value', 'Hello Customer A')
+    panel().find('input[type="tel"]').clear().type('9000000000')
     submit()
     cy.wait('@send').then(({ request }) => {
-      expect(request.body.whatsapp_template_id).to.eq(71)
-      expect(request.body.whatsapp_template_params).to.deep.eq({ ...whatsappDraft.templateParams, 'body:1': 'Customer B' })
+      expect(request.body.content).to.eq('Hello Customer A')
     })
     checkSaved('WhatsApp', (draft) => expect(draft).to.eq(null))
-  })
-
-  it('preserves partial WhatsApp parameters without enabling Send', () => {
-    visitDraft('whatsapp', { ...whatsappDraft, templateParams: { 'body:1': 'Customer A' } })
-    cy.wait('@templates')
-    reloadDraft()
-    cy.wait('@templates')
-    panel().find('input.col-span-2').eq(0).should('have.value', 'Customer A')
-    panel().find('input.col-span-2').eq(1).should('have.value', '')
-    panel().find('button[type="submit"]:visible').should('be.disabled')
-  })
-
-  it('does not restore a deleted template or carry parameters to a different inbox', () => {
-    visitDraft('whatsapp', whatsappDraft)
-    cy.wait('@templates')
-    panel().contains('button[role="combobox"]', 'Draft WhatsApp inbox').click()
-    cy.contains('[role="option"]', 'Other WhatsApp inbox').click()
-    cy.wait('@templates')
-    panel().find('input.col-span-2').should('not.exist')
-    checkSaved('WhatsApp', (draft) => expect(draft.templateId).to.eq(null))
-    cy.intercept('GET', '**/api/v1/whatsapp/templates*', { body: { data: [] } }).as('emptyTemplates')
-    visitDraft('whatsapp', whatsappDraft)
-    cy.wait('@emptyTemplates')
-    panel().find('input.col-span-2').should('not.exist')
-    panel().find('button[type="submit"]:visible').should('be.disabled')
   })
 
   it('targets the visible composer after minimizing, switching channels and restoring', () => {

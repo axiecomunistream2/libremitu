@@ -41,7 +41,6 @@ import (
 	"github.com/abhinavxd/libredesk/internal/template"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 	wmodels "github.com/abhinavxd/libredesk/internal/webhook/models"
-	wtmodels "github.com/abhinavxd/libredesk/internal/whatsapp/template/models"
 	"github.com/abhinavxd/libredesk/internal/ws"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -117,7 +116,6 @@ type Manager struct {
 	automation                 *automation.Engine
 	wsHub                      *ws.Hub
 	template                   *template.Manager
-	whatsappTemplate           WhatsAppTemplateStore
 	incomingMessageQueue       chan models.IncomingMessage
 	outgoingMessageQueue       chan models.Message
 	outgoingProcessingMessages sync.Map
@@ -235,12 +233,6 @@ type webhookStore interface {
 	TriggerWebhook(webhookID int, event wmodels.WebhookEvent, data any)
 }
 
-type WhatsAppTemplateStore interface {
-	GetByID(id int) (wtmodels.Template, error)
-	GetByName(inboxID int, name string) (wtmodels.Template, error)
-	GetApproved(inboxID int, name, language string) (wtmodels.Template, error)
-}
-
 // ContinuityConfig holds configuration for conversation continuity emails
 type ContinuityConfig struct {
 	BatchCheckInterval time.Duration
@@ -326,11 +318,6 @@ func New(
 	}
 
 	return c, nil
-}
-
-// SetWhatsAppTemplateStore wires the WhatsApp template store after construction. Nil disables template sends.
-func (m *Manager) SetWhatsAppTemplateStore(s WhatsAppTemplateStore) {
-	m.whatsappTemplate = s
 }
 
 type queries struct {

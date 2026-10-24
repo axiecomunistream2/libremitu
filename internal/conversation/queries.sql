@@ -1138,7 +1138,10 @@ WHERE m.source_id = $1
 RETURNING m.uuid, c.uuid AS conversation_uuid, m.status, m.meta;
 
 -- name: get-whatsapp-read-receipt-target
-SELECT cm.source_id, c.inbox_id
+SELECT cm.source_id, c.inbox_id,
+       COALESCE((SELECT identifier FROM contact_channel_identities cci
+                 WHERE cci.contact_id = c.contact_id AND cci.channel = 'whatsapp'
+                 ORDER BY cci.id LIMIT 1), '') AS phone
 FROM conversation_messages cm
 JOIN conversations c ON c.id = cm.conversation_id
 JOIN inboxes i ON i.id = c.inbox_id

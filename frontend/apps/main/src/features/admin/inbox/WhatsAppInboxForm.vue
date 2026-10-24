@@ -1,13 +1,5 @@
 <template>
   <form @submit="onSubmit" class="space-y-6 w-full">
-    <div
-      v-if="initialValues?.token_invalid"
-      class="box border-destructive/40 bg-destructive/5 p-3 text-sm flex items-start gap-2"
-    >
-      <TriangleAlert class="size-4 mt-0.5 text-destructive shrink-0" />
-      <span>{{ $t('admin.inbox.whatsapp.tokenInvalid') }}</span>
-    </div>
-
     <FormField v-slot="{ componentField }" name="name">
       <FormItem>
         <FormLabel>{{ $t('globals.terms.name') }}</FormLabel>
@@ -48,10 +40,6 @@
           @update:checked="handleChange"
         />
       </FormItem>
-      <p class="!mt-2 text-muted-foreground text-sm flex items-start gap-1.5">
-        <Lightbulb class="size-4 mt-0.5 shrink-0" />
-        <span>{{ $t('admin.inbox.csatSurveys.description_3') }}</span>
-      </p>
     </FormField>
 
     <div class="max-w-xl">
@@ -72,148 +60,29 @@
     <div v-show="csatEnabled" class="box p-4 space-y-4">
       <div>
         <h3 class="ui-heading">{{ $t('globals.terms.csatSurveyTemplate') }}</h3>
-        <p class="!mt-1 ui-description flex items-start gap-1.5">
-          <Lightbulb class="size-4 mt-0.5 shrink-0" />
-          <span>{{ $t('admin.inbox.whatsapp.csatTemplate.description') }}</span>
-        </p>
       </div>
-
-      <FormField v-slot="{ componentField }" name="config.csat_template_body">
+      <FormField v-slot="{ componentField }" name="config.csat_message">
         <FormItem>
-          <FormLabel>{{ $t('globals.terms.message', 1) }}</FormLabel>
+          <FormLabel>{{ $t('admin.inbox.whatsapp.csatMessage') }}</FormLabel>
           <FormControl>
             <Textarea rows="3" v-bind="componentField" />
           </FormControl>
           <FormDescription>
-            {{ $t('admin.inbox.whatsapp.csatTemplateBody.description') }}
+            {{ $t('admin.inbox.whatsapp.csatMessage.description') }}
           </FormDescription>
           <FormMessage />
         </FormItem>
       </FormField>
-
-      <FormGrid>
-        <FormField v-slot="{ componentField }" name="config.csat_template_button_text">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.buttonText') }}</FormLabel>
-            <FormControl>
-              <Input type="text" v-bind="componentField" />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-
-        <FormField v-slot="{ componentField }" name="config.csat_template_language">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.language', 1) }}</FormLabel>
-            <FormControl>
-              <ComboBox
-                v-bind="componentField"
-                :items="WHATSAPP_TEMPLATE_LANGUAGES"
-                :placeholder="$t('globals.terms.search')"
-              />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-      </FormGrid>
     </div>
 
-    <div class="box p-4 space-y-4">
-      <h3 class="ui-heading">{{ $t('admin.inbox.whatsapp.metaCredentials') }}</h3>
-      <FormGrid>
-        <FormField v-slot="{ componentField }" name="config.phone_number_id">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.phoneNumberID') }}</FormLabel>
-            <FormControl>
-              <Input type="text" v-bind="componentField" />
-            </FormControl>
-            <FormDescription>
-              {{ $t('admin.inbox.whatsapp.phoneNumberID.description') }}
-            </FormDescription>
-            <FormMessage />
-          </FormItem>
-        </FormField>
+    <WagoDevicePanel />
 
-        <FormField v-slot="{ componentField }" name="config.waba_id">
-          <FormItem>
-            <FormLabel>{{ $t('admin.inbox.whatsapp.wabaID') }}</FormLabel>
-            <FormControl>
-              <Input type="text" v-bind="componentField" />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-      </FormGrid>
-
-      <FormGrid>
-        <FormField v-slot="{ componentField }" name="config.access_token">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.accessToken') }}</FormLabel>
-            <FormControl>
-              <Input type="password" placeholder="••••••••" v-bind="componentField" />
-            </FormControl>
-            <FormDescription>
-              {{ $t('admin.inbox.whatsapp.accessToken.description') }}
-            </FormDescription>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-
-        <FormField v-slot="{ componentField }" name="config.app_secret">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.appSecret') }}</FormLabel>
-            <FormControl>
-              <Input type="password" placeholder="••••••••" v-bind="componentField" />
-            </FormControl>
-            <FormDescription>
-              {{ $t('admin.inbox.whatsapp.appSecret.description') }}
-            </FormDescription>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-      </FormGrid>
-
-      <div class="max-w-xl">
-        <FormField v-slot="{ componentField }" name="config.api_version">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.apiVersion') }}</FormLabel>
-            <FormControl>
-              <Input type="text" placeholder="v26.0" v-bind="componentField" />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-      </div>
-    </div>
-
-    <div class="box p-4 space-y-4">
+    <div v-if="webhookURL" class="box p-4 space-y-2">
       <h3 class="ui-heading">{{ $t('globals.terms.webhook', 1) }}</h3>
-      <p v-if="webhookURL" class="ui-description flex items-start gap-1.5">
-        <Lightbulb class="size-4 mt-0.5 shrink-0" />
-        <span>{{ $t('admin.inbox.whatsapp.webhook.description') }}</span>
-      </p>
-
-      <div class="max-w-xl">
-        <FormField v-slot="{ componentField }" name="config.webhook_verify_token">
-          <FormItem>
-            <FormLabel>{{ $t('globals.terms.webhookVerifyToken') }}</FormLabel>
-            <FormControl>
-              <Input type="text" v-bind="componentField" />
-            </FormControl>
-            <FormDescription>
-              {{ $t('admin.inbox.whatsapp.verifyToken.description') }}
-            </FormDescription>
-            <FormMessage />
-          </FormItem>
-        </FormField>
-
-        <div v-if="webhookURL" class="space-y-2">
-          <Label class="text-muted-foreground">{{ $t('globals.terms.callbackURL') }}</Label>
-          <div class="flex items-center gap-2">
-            <Input :model-value="webhookURL" readonly class="font-mono text-xs" />
-            <CopyButton :text="webhookURL" />
-          </div>
-        </div>
+      <p class="ui-description">{{ $t('admin.inbox.whatsapp.webhook.description') }}</p>
+      <div class="flex items-center gap-2 max-w-xl">
+        <Input :model-value="webhookURL" readonly class="font-mono text-xs" />
+        <CopyButton :text="webhookURL" />
       </div>
     </div>
 
@@ -224,16 +93,10 @@
 </template>
 
 <script setup>
-import FormGrid from '@shared-ui/components/FormGrid.vue'
-import { watch, computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
-import {
-  createFormSchema,
-  DEFAULT_CSAT_TEMPLATE_LANGUAGE,
-  DEFAULT_CSAT_TEMPLATE_BODY,
-  DEFAULT_CSAT_TEMPLATE_BUTTON_TEXT
-} from './whatsappFormSchema.js'
+import { createFormSchema } from './whatsappFormSchema.js'
 import {
   FormControl,
   FormField,
@@ -243,14 +106,11 @@ import {
   FormDescription
 } from '@shared-ui/components/ui/form/index.js'
 import { Input } from '@shared-ui/components/ui/input/index.js'
-import { Label } from '@shared-ui/components/ui/label'
-import ComboBox from '@shared-ui/components/ui/combobox/ComboBox.vue'
-import { WHATSAPP_TEMPLATE_LANGUAGES } from '@main/features/admin/whatsapp/whatsappLanguages.js'
 import { Textarea } from '@shared-ui/components/ui/textarea/index.js'
 import SwitchField from '@shared-ui/components/SwitchField.vue'
 import { Button } from '@shared-ui/components/ui/button/index.js'
 import CopyButton from '@/components/button/CopyButton.vue'
-import { Lightbulb, TriangleAlert } from 'lucide-vue-next'
+import WagoDevicePanel from './WagoDevicePanel.vue'
 import { useI18n } from 'vue-i18n'
 
 const props = defineProps({
@@ -277,15 +137,10 @@ const props = defineProps({
 })
 
 const { t } = useI18n()
-
 const webhookURL = computed(() => props.initialValues?.webhook_url || '')
-
-const submitLabel = computed(() => {
-  return (
-    props.submitLabel ||
-    (props.isNewForm ? t('globals.messages.create') : t('globals.messages.save'))
-  )
-})
+const submitLabel = computed(
+  () => props.submitLabel || (props.isNewForm ? t('globals.messages.create') : t('globals.messages.save'))
+)
 
 const form = useForm({
   validationSchema: computed(() => toTypedSchema(createFormSchema(t))),
@@ -296,15 +151,7 @@ const form = useForm({
     prompt_tags_on_reply: false,
     reopen_window_hours: 48,
     config: {
-      phone_number_id: '',
-      waba_id: '',
-      access_token: '',
-      app_secret: '',
-      webhook_verify_token: '',
-      api_version: 'v26.0',
-      csat_template_language: DEFAULT_CSAT_TEMPLATE_LANGUAGE,
-      csat_template_body: DEFAULT_CSAT_TEMPLATE_BODY,
-      csat_template_button_text: DEFAULT_CSAT_TEMPLATE_BUTTON_TEXT
+      csat_message: ''
     }
   }
 })
@@ -328,11 +175,7 @@ watch(
         reopen_window_hours: newValues.reopen_window_hours ?? 0,
         config: {
           ...(newValues.config || {}),
-          csat_template_language:
-            newValues.config?.csat_template_language || DEFAULT_CSAT_TEMPLATE_LANGUAGE,
-          csat_template_body: newValues.config?.csat_template_body || DEFAULT_CSAT_TEMPLATE_BODY,
-          csat_template_button_text:
-            newValues.config?.csat_template_button_text || DEFAULT_CSAT_TEMPLATE_BUTTON_TEXT
+          csat_message: newValues.config?.csat_message || ''
         }
       },
       false

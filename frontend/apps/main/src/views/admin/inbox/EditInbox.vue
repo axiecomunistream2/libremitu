@@ -125,20 +125,12 @@ const submitForm = (values) => {
   } else if (inbox.value.channel === 'whatsapp') {
     payload = {
       name: values.name,
-      from: values.from,
       channel: inbox.value.channel,
       enabled: values.enabled,
       csat_enabled: values.csat_enabled,
       prompt_tags_on_reply: values.prompt_tags_on_reply,
       reopen_window_hours: values.reopen_window_hours,
       config: { ...values.config }
-    }
-    // Emptying a masked secret makes the backend keep the existing encrypted value.
-    if (payload.config.access_token?.includes('•')) {
-      payload.config.access_token = ''
-    }
-    if (payload.config.app_secret?.includes('•')) {
-      payload.config.app_secret = ''
     }
   }
 

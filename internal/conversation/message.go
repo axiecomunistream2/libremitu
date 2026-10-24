@@ -503,7 +503,7 @@ func (m *Manager) UpdateMessageSourceID(messageUUID, sourceID string) error {
 	return nil
 }
 
-// UpdateConversationLastInboundAt advances the clock gating business-initiated messages (WhatsApp 24h window).
+// UpdateConversationLastInboundAt records the contact's latest inbound message for continuity and reporting.
 func (m *Manager) UpdateConversationLastInboundAt(conversationID int, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now()
@@ -667,11 +667,8 @@ func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID
 		return models.Message{}, envelope.NewError(envelope.InputError, m.i18n.T("status.disabledInbox"), nil)
 	}
 
-	isWhatsAppTemplate := inboxRecord.Channel == inbox.ChannelWhatsApp && extractInt(metaMap, "whatsapp_template_id") > 0
-	if !isWhatsAppTemplate {
-		if data, err := m.BuildTemplateData(conversationUUID, senderID); err == nil {
-			content = m.template.RenderString(data, content)
-		}
+	if data, err := m.BuildTemplateData(conversationUUID, senderID); err == nil {
+		content = m.template.RenderString(data, content)
 	}
 
 	var (
@@ -707,11 +704,11 @@ func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID
 			return models.Message{}, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 		}
 	case inbox.ChannelWhatsApp:
-		// Meta accepts one media per message, so a multi-attachment reply must be sent as separate messages.
+		// WhatsApp accepts one media per message, so a multi-attachment reply must be sent as separate messages.
 		if len(media) > 1 {
 			return models.Message{}, envelope.NewError(envelope.InputError, m.i18n.T("conversation.whatsapp.error.oneAttachment"), nil)
 		}
-		// Reject unsendable media here. Meta's upload endpoint enforces the same caps and would only fail after the message is queued.
+		// Reject unsendable media here, ahead of the WAGO upload.
 		for _, md := range media {
 			if reason := whatsappChannel.RejectMediaReason(md.Filename, md.ContentType, md.Size); reason != "" {
 				return models.Message{}, envelope.NewError(envelope.InputError, reason, nil)
@@ -722,10 +719,6 @@ func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID
 			return models.Message{}, err
 		}
 		content = rendered
-		// A rendered template body is plain text. Storing it as HTML drops its line breaks in the timeline.
-		if isWhatsAppTemplate {
-			contentType = models.ContentTypeText
-		}
 	}
 
 	// Marshal meta.

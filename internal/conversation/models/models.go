@@ -467,14 +467,6 @@ func (m *Message) StripCSATUUID() {
 		return
 	}
 	delete(meta, "csat_uuid")
-	if params, ok := meta["whatsapp_template_params"].(map[string]any); ok {
-		delete(params, "button_url_0")
-	}
-	if whatsapp, ok := meta["whatsapp"].(map[string]any); ok {
-		if params, ok := whatsapp["template_params"].(map[string]any); ok {
-			delete(params, "button_url_0")
-		}
-	}
 	if updatedMeta, err := json.Marshal(meta); err == nil {
 		m.Meta = json.RawMessage(updatedMeta)
 	}

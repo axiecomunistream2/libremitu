@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -18,7 +17,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/inbox"
 	"github.com/abhinavxd/libredesk/internal/testutil"
 	"github.com/abhinavxd/libredesk/internal/user"
-	"github.com/abhinavxd/libredesk/internal/whatsapp"
+	"github.com/abhinavxd/libredesk/internal/wago"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
@@ -56,17 +55,10 @@ func TestIngestWhatsAppMessageBlockedContact(t *testing.T) {
 	}
 
 	var downloads atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		downloads.Add(1)
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(server.Close)
-	app.whatsappClient = whatsapp.New(app.lo)
-	app.whatsappClient.SetBaseURL(server.URL)
 
 	var inboxID int
 	if err := db.Get(&inboxID, `INSERT INTO inboxes (channel, name, "from", config, reopen_window_hours)
-		VALUES ('whatsapp', 'Blocking test', '', '{"phone_number_id":"PN-BLOCKING"}', 24) RETURNING id`); err != nil {
+		VALUES ('whatsapp', 'Blocking test', '', '{}', 24) RETURNING id`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -111,9 +103,9 @@ func TestIngestWhatsAppMessageBlockedContact(t *testing.T) {
 			}
 			before := snapshot()
 			for _, typ := range []string{"text", "image", "unsupported"} {
-				msg := whatsapp.ParsedMessage{ID: "wamid.blocked." + from + typ, From: from, Type: typ, Text: "Hello", Timestamp: time.Now()}
+				msg := wago.ParsedMessage{ID: "wamid.blocked." + from + typ, From: from, Type: typ, Text: "Hello", Timestamp: time.Now()}
 				if typ == "image" {
-					msg.MediaID = "blocked-media"
+					msg.MediaPath = "statics/media/blocked-media.jpg"
 				}
 				for range 2 {
 					if err := ingestWhatsAppMessage(t.Context(), app, inboxID, msg); err != nil {
@@ -141,7 +133,7 @@ func TestIngestWhatsAppMessageBlockedContact(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
-			msg := whatsapp.ParsedMessage{ID: "wamid.unblocked." + from, From: from, Type: "text", Text: "Hello", Timestamp: time.Now()}
+			msg := wago.ParsedMessage{ID: "wamid.unblocked." + from, From: from, Type: "text", Text: "Hello", Timestamp: time.Now()}
 			if err := ingestWhatsAppMessage(ctx, app, inboxID, msg); !errors.Is(err, context.Canceled) {
 				t.Fatalf("unblocked contact did not resume ingestion: %v", err)
 			}
@@ -152,19 +144,19 @@ func TestIngestWhatsAppMessageBlockedContact(t *testing.T) {
 func TestTextPreview(t *testing.T) {
 	tests := []struct {
 		name string
-		msg  whatsapp.ParsedMessage
+		msg  wago.ParsedMessage
 		want string
 	}{
-		{"text wins", whatsapp.ParsedMessage{Type: "text", Text: "hello"}, "hello"},
-		{"caption when there is no text", whatsapp.ParsedMessage{Type: "image", Caption: "the box"}, "the box"},
-		{"image placeholder", whatsapp.ParsedMessage{Type: "image"}, "[image]"},
-		{"video placeholder", whatsapp.ParsedMessage{Type: "video"}, "[video]"},
-		{"audio placeholder", whatsapp.ParsedMessage{Type: "audio"}, "[audio]"},
-		{"voice note placeholder", whatsapp.ParsedMessage{Type: "voice"}, "[audio]"},
-		{"document placeholder", whatsapp.ParsedMessage{Type: "document"}, "[document]"},
-		{"sticker placeholder", whatsapp.ParsedMessage{Type: "sticker"}, "[sticker]"},
-		{"unsupported explains itself", whatsapp.ParsedMessage{Type: "unsupported"}, "[unsupported message: not delivered by WhatsApp]"},
-		{"unknown type falls back", whatsapp.ParsedMessage{Type: "order"}, "[whatsapp message]"},
+		{"text wins", wago.ParsedMessage{Type: "text", Text: "hello"}, "hello"},
+		{"caption is the body text", wago.ParsedMessage{Type: "image", Text: "the box"}, "the box"},
+		{"image placeholder", wago.ParsedMessage{Type: "image"}, "[image]"},
+		{"video placeholder", wago.ParsedMessage{Type: "video"}, "[video]"},
+		{"audio placeholder", wago.ParsedMessage{Type: "audio"}, "[audio]"},
+		{"voice note placeholder", wago.ParsedMessage{Type: "voice"}, "[audio]"},
+		{"document placeholder", wago.ParsedMessage{Type: "document"}, "[document]"},
+		{"sticker placeholder", wago.ParsedMessage{Type: "sticker"}, "[sticker]"},
+		{"unsupported explains itself", wago.ParsedMessage{Type: "unsupported"}, "[unsupported message: not delivered by WhatsApp]"},
+		{"unknown type falls back", wago.ParsedMessage{Type: "order"}, "[whatsapp message]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,14 +219,14 @@ func TestIsPermanentMediaError(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{"404 from meta", &whatsapp.MetaAPIError{StatusCode: http.StatusNotFound}, true},
-		{"400 from meta", &whatsapp.MetaAPIError{StatusCode: http.StatusBadRequest}, true},
-		{"401 is retryable, a replaced token recovers the media", &whatsapp.MetaAPIError{StatusCode: http.StatusUnauthorized}, false},
-		{"403 is retryable", &whatsapp.MetaAPIError{StatusCode: http.StatusForbidden}, false},
-		{"408 is retryable", &whatsapp.MetaAPIError{StatusCode: http.StatusRequestTimeout}, false},
-		{"429 is retryable", &whatsapp.MetaAPIError{StatusCode: http.StatusTooManyRequests}, false},
-		{"500 is retryable", &whatsapp.MetaAPIError{StatusCode: http.StatusInternalServerError}, false},
-		{"wrapped meta error", fmt.Errorf("downloading: %w", &whatsapp.MetaAPIError{StatusCode: http.StatusGone}), true},
+		{"404 from meta", &wago.APIError{StatusCode: http.StatusNotFound}, true},
+		{"400 from meta", &wago.APIError{StatusCode: http.StatusBadRequest}, true},
+		{"401 is retryable, a replaced token recovers the media", &wago.APIError{StatusCode: http.StatusUnauthorized}, false},
+		{"403 is retryable", &wago.APIError{StatusCode: http.StatusForbidden}, false},
+		{"408 is retryable", &wago.APIError{StatusCode: http.StatusRequestTimeout}, false},
+		{"429 is retryable", &wago.APIError{StatusCode: http.StatusTooManyRequests}, false},
+		{"500 is retryable", &wago.APIError{StatusCode: http.StatusInternalServerError}, false},
+		{"wrapped meta error", fmt.Errorf("downloading: %w", &wago.APIError{StatusCode: http.StatusGone}), true},
 		{"deadline exceeded is retryable", context.DeadlineExceeded, false},
 		{"truncated body is retryable", io.ErrUnexpectedEOF, false},
 		{"network error is retryable", &net.DNSError{IsTimeout: true}, false},
@@ -306,27 +298,6 @@ func TestWhatsAppCallbackURLFromRoot(t *testing.T) {
 	}
 }
 
-// Meta has to reach the callback URL, so anything local or plain HTTP must not be auto-registered.
-func TestIsPublicWebhookURL(t *testing.T) {
-	tests := map[string]bool{
-		"https://desk.example.com":  true,
-		"https://desk.example.com/": true,
-		" https://desk.example.com": true,
-		"http://desk.example.com":   false,
-		"https://localhost:9000":    false,
-		"https://127.0.0.1:9000":    false,
-		"https://[::1]:9000":        false,
-		"https://":                  false,
-		"":                          false,
-		"not a url":                 false,
-	}
-	for root, want := range tests {
-		if got := isPublicWebhookURL(root); got != want {
-			t.Errorf("%q: expected %v, got %v", root, want, got)
-		}
-	}
-}
-
 // testI18nApp carries the real language file, so a renamed i18n key fails the test.
 func testI18nApp(t *testing.T) *App {
 	t.Helper()
@@ -342,18 +313,23 @@ func testI18nApp(t *testing.T) *App {
 }
 
 // GetAll fails wholesale when any single inbox row cannot be decoded, and reporting that as "no inbox" drops the message.
-func TestResolveWhatsAppInboxSeparatesLookupFailureFromUnroutable(t *testing.T) {
+func TestResolveWhatsAppInbox(t *testing.T) {
 	app, db := testInboxApp(t)
 
 	var okID int
 	if err := db.QueryRow(`INSERT INTO inboxes (channel, config, "name", enabled, "from")
-		VALUES ('whatsapp', '{"phone_number_id":"PN-A"}'::jsonb, 'wa-ok', true, '') RETURNING id`).Scan(&okID); err != nil {
-		t.Fatalf("seeding the routable inbox: %v", err)
+		VALUES ('whatsapp', '{}'::jsonb, 'wa-ok', true, '') RETURNING id`).Scan(&okID); err != nil {
+		t.Fatalf("seeding the enabled inbox: %v", err)
 	}
 
-	// An unknown phone number id with every inbox readable is genuinely unroutable: drop it.
-	if _, _, err := resolveWhatsAppInbox(app, okID, "PN-UNKNOWN"); !errors.Is(err, errNoEnabledWhatsAppInbox) {
-		t.Fatalf("expected an unroutable message to stay droppable, got %v", err)
+	// The URL inbox wins when it is enabled.
+	if rec, err := resolveWhatsAppInbox(app, okID); err != nil || rec.ID != okID {
+		t.Fatalf("expected inbox %d, got %d, %v", okID, rec.ID, err)
+	}
+
+	// A stale URL falls back to the only enabled inbox.
+	if rec, err := resolveWhatsAppInbox(app, okID+999); err != nil || rec.ID != okID {
+		t.Fatalf("expected fallback to inbox %d, got %d, %v", okID, rec.ID, err)
 	}
 
 	// One undecodable row makes GetAll fail for every caller, and the message is still deliverable on a retry.
@@ -361,7 +337,7 @@ func TestResolveWhatsAppInboxSeparatesLookupFailureFromUnroutable(t *testing.T) 
 		VALUES ('whatsapp', '"corrupt"'::jsonb, 'wa-corrupt', true, '')`); err != nil {
 		t.Fatalf("seeding the undecodable inbox: %v", err)
 	}
-	_, _, err := resolveWhatsAppInbox(app, okID, "PN-B")
+	_, err := resolveWhatsAppInbox(app, okID)
 	if err == nil {
 		t.Fatal("expected the lookup failure to surface")
 	}

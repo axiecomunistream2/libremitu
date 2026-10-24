@@ -1,8 +1,6 @@
 env:
   - GO111MODULE=on
   - CGO_ENABLED=0
-  - GITHUB_ORG=abhinavxd
-  - DOCKER_ORG=libredesk
 
 before:
   hooks:
@@ -179,7 +177,7 @@ docker_manifests:
 
 release:
   github:
-    owner: abhinavxd
-    name: libredesk
+    owner: '{{ .Env.GITHUB_ORG }}'
+    name: '{{ .Env.GITHUB_REPO_NAME }}'
   prerelease: auto
   draft: true

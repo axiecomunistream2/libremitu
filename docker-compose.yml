@@ -1,7 +1,11 @@
 services:
   # Libredesk app
   app:
-    image: libredesk/libredesk:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: libremitu:local
+    pull_policy: build
     container_name: libredesk_app
     restart: unless-stopped
     ports:
@@ -10,6 +14,12 @@ services:
       # If the password is set during first docker-compose up, the system user password will be set to this value.
       # You can always set system user password later by running `docker exec -it libredesk_app ./libredesk --set-system-user-password`.
       LIBREDESK_SYSTEM_USER_PASSWORD: ${LIBREDESK_SYSTEM_USER_PASSWORD:-}
+      # WAGO connection. Uncomment and set these instead of editing config.toml.
+      # LIBREDESK_WAGO__BASE_URL: https://wago.example.com
+      # LIBREDESK_WAGO__DEVICE_ID: your-wago-device-id
+      # LIBREDESK_WAGO__USERNAME: wago-basic-auth-user
+      # LIBREDESK_WAGO__PASSWORD: wago-basic-auth-password
+      # LIBREDESK_WAGO__WEBHOOK_SECRET: same-value-as-WHATSAPP_WEBHOOK_SECRET
     networks:
       - libredesk
     depends_on:

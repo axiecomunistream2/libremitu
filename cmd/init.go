@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,9 +57,8 @@ import (
 	tmpl "github.com/abhinavxd/libredesk/internal/template"
 	"github.com/abhinavxd/libredesk/internal/user"
 	"github.com/abhinavxd/libredesk/internal/view"
+	"github.com/abhinavxd/libredesk/internal/wago"
 	"github.com/abhinavxd/libredesk/internal/webhook"
-	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
-	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
@@ -125,6 +125,22 @@ func validateConfig(ko *koanf.Koanf) {
 	// Warn if using sample config value.
 	if encKey == sampleEncKey {
 		colorlog.Red("WARNING: You are using the sample encryption_key from config.sample.toml. Change it immediately. Generate a secure key with `openssl rand -hex 16`")
+	}
+
+	baseURL := strings.TrimSpace(ko.String("wago.base_url"))
+	deviceID := strings.TrimSpace(ko.String("wago.device_id"))
+	if baseURL == "" && deviceID == "" {
+		return
+	}
+	if baseURL == "" || deviceID == "" {
+		log.Fatalf("wago.base_url and wago.device_id must be set together")
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		log.Fatalf("wago.base_url must be an absolute http(s) URL, got %q", baseURL)
+	}
+	if strings.TrimSpace(ko.String("wago.webhook_secret")) == "" {
+		colorlog.Red("WARNING: wago.webhook_secret is empty, so WAGO webhooks will be rejected")
 	}
 }
 
@@ -802,8 +818,8 @@ func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, u
 	return inbox, nil
 }
 
-// initWhatsAppInbox initializes a WhatsApp Cloud API inbox.
-func initWhatsAppInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, client *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater) (inbox.Inbox, error) {
+// initWhatsAppInbox initializes a WAGO-backed WhatsApp inbox.
+func initWhatsAppInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, client *wago.Client, sourceUpdater whatsappChannel.SourceIDUpdater) (inbox.Inbox, error) {
 	var config whatsappChannel.Config
 	if err := json.Unmarshal(inboxRecord.Config, &config); err != nil {
 		return nil, fmt.Errorf("unmarshalling whatsapp config for inbox %q: %w", inboxRecord.Name, err)
@@ -826,7 +842,7 @@ func initWhatsAppInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, c
 }
 
 // makeInboxInitializer creates an inbox initializer function.
-func makeInboxInitializer(mgr *inbox.Manager, signAvatarURL func(*null.String), waClient *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback) func(imodels.Inbox, inbox.MessageStore, inbox.UserStore) (inbox.Inbox, error) {
+func makeInboxInitializer(mgr *inbox.Manager, signAvatarURL func(*null.String), waClient *wago.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback) func(imodels.Inbox, inbox.MessageStore, inbox.UserStore) (inbox.Inbox, error) {
 	return func(inboxR imodels.Inbox, msgStore inbox.MessageStore, usrStore inbox.UserStore) (inbox.Inbox, error) {
 		switch inboxR.Channel {
 		case inbox.ChannelEmail:
@@ -848,11 +864,11 @@ func reloadInbox(app *App, id int) error {
 	if err := ensureWhatsAppIngester(app); err != nil {
 		app.lo.Error("error starting whatsapp ingester after an inbox change", "id", id, "error", err)
 	}
-	return app.inbox.ReloadInbox(app.ctx, id, makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.whatsappClient, app.conversation, makeInboxAuthStatusHook(app)))
+	return app.inbox.ReloadInbox(app.ctx, id, makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.wagoClient, app.conversation, makeInboxAuthStatusHook(app)))
 }
 
 // startInboxes registers the active inboxes and starts receiver for each.
-func startInboxes(ctx context.Context, mgr *inbox.Manager, msgStore inbox.MessageStore, usrStore inbox.UserStore, signAvatarURL func(*null.String), waClient *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback) {
+func startInboxes(ctx context.Context, mgr *inbox.Manager, msgStore inbox.MessageStore, usrStore inbox.UserStore, signAvatarURL func(*null.String), waClient *wago.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback) {
 	mgr.SetMessageStore(msgStore)
 	mgr.SetUserStore(usrStore)
 
@@ -865,50 +881,19 @@ func startInboxes(ctx context.Context, mgr *inbox.Manager, msgStore inbox.Messag
 	}
 }
 
-// initWhatsAppClient constructs the shared Meta Graph API client.
-func initWhatsAppClient() *whatsappapi.Client {
-	client := whatsappapi.New(initLogger("whatsapp_client"))
-	// Points the client at a stand-in Graph API. Tests set it, production leaves it empty.
-	if url := strings.TrimSpace(ko.String("whatsapp.api_url")); url != "" {
-		log.Printf("WARNING: whatsapp api_url is overridden to %s, no message will reach Meta", url)
-		client.SetBaseURL(url)
+// initWagoClient constructs the shared WAGO client. Nil disables WhatsApp inboxes.
+func initWagoClient() *wago.Client {
+	baseURL := strings.TrimSpace(ko.String("wago.base_url"))
+	deviceID := strings.TrimSpace(ko.String("wago.device_id"))
+	if baseURL == "" || deviceID == "" {
+		return nil
 	}
-	return client
-}
-
-// inboxAccountResolver resolves per-inbox Meta credentials for the template manager.
-type inboxAccountResolver struct {
-	inbox *inbox.Manager
-}
-
-func (r *inboxAccountResolver) WhatsAppAccount(inboxID int) (whatsappapi.Account, error) {
-	rec, err := r.inbox.GetDBRecord(inboxID)
-	if err != nil {
-		return whatsappapi.Account{}, err
-	}
-	if rec.Channel != whatsappChannel.ChannelWhatsApp {
-		return whatsappapi.Account{}, fmt.Errorf("inbox %d is not whatsapp", inboxID)
-	}
-	var cfg whatsappChannel.Config
-	if err := json.Unmarshal(rec.Config, &cfg); err != nil {
-		return whatsappapi.Account{}, fmt.Errorf("decoding whatsapp config: %w", err)
-	}
-	return cfg.Account(), nil
-}
-
-// initWhatsAppTemplates wires the WhatsApp template manager.
-func initWhatsAppTemplates(db *sqlx.DB, i18n *i18n.I18n, client *whatsappapi.Client, inboxMgr *inbox.Manager) *whatsappTemplate.Manager {
-	mgr, err := whatsappTemplate.New(whatsappTemplate.Opts{
-		Lo:       initLogger("whatsapp_template"),
-		DB:       db,
-		I18n:     i18n,
-		Client:   client,
-		Resolver: &inboxAccountResolver{inbox: inboxMgr},
+	return wago.New(initLogger("wago_client"), wago.Opts{
+		BaseURL:  baseURL,
+		DeviceID: deviceID,
+		Username: strings.TrimSpace(ko.String("wago.username")),
+		Password: ko.String("wago.password"),
 	})
-	if err != nil {
-		log.Fatalf("error initializing whatsapp template manager: %v", err)
-	}
-	return mgr
 }
 
 // initAuthz initializes authorization enforcer.

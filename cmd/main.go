@@ -53,9 +53,8 @@ import (
 	"github.com/abhinavxd/libredesk/internal/team"
 	"github.com/abhinavxd/libredesk/internal/template"
 	"github.com/abhinavxd/libredesk/internal/user"
+	"github.com/abhinavxd/libredesk/internal/wago"
 	"github.com/abhinavxd/libredesk/internal/webhook"
-	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
-	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
 	"github.com/knadh/go-i18n"
 	"github.com/knadh/koanf/v2"
@@ -141,8 +140,7 @@ type App struct {
 	redis              *redis.Client
 	fc                 *fastcache.FastCache
 	importer           *importer.Importer
-	whatsappTemplate   *whatsappTemplate.Manager
-	whatsappClient     *whatsappapi.Client
+	wagoClient         *wago.Client
 	whatsappIngester   atomic.Pointer[WhatsAppIngester]
 	whatsappIngesterMu sync.Mutex
 	// Inbox IDs whose provider credentials were recently rejected, keyed to the last error time.
@@ -286,9 +284,7 @@ func main() {
 	automation.SetSystemUserID(systemUser.ID)
 	conversation.SetAIAgent(aiAgent)
 
-	waClient := initWhatsAppClient()
-	waTemplates := initWhatsAppTemplates(db, i18n, waClient, inbox)
-	conversation.SetWhatsAppTemplateStore(waTemplates)
+	waClient := initWagoClient()
 	conversation.SetArticleReferenceStore(helpCenter)
 
 	go automation.Run(ctx, automationWorkers)
@@ -353,8 +349,7 @@ func main() {
 		redis:            rdb,
 		fc:               initFastCache(rdb),
 		userNotification: userNotification,
-		whatsappClient:   waClient,
-		whatsappTemplate: waTemplates,
+		wagoClient:       waClient,
 		notificationPref: notificationPreference,
 		pushNotification: pushNotification,
 		wsHub:            wsHub,
@@ -362,7 +357,6 @@ func main() {
 	app.consts.Store(constants)
 	helpCenterCacheOpts.Logger = log.New(helpCenterCacheLogWriter{lo: app.lo}, "", 0)
 
-	waClient.SetAuthErrorHook(makeWhatsAppAuthErrorHook(app))
 	if err := ensureWhatsAppIngester(app); err != nil {
 		app.lo.Error("error starting whatsapp ingester, inbound whatsapp messages will not be processed", "error", err)
 	}
@@ -371,8 +365,6 @@ func main() {
 
 	// The outgoing scanner needs the inboxes registered, else queued messages fail with "inbox not found".
 	go conversation.Run(ctx, messageIncomingQWorkers, messageOutgoingQWorkers, messageOutgoingScanInterval)
-
-	go whatsappTemplateSyncWorker(ctx, app)
 
 	g := fastglue.NewGlue()
 	g.SetContext(app)

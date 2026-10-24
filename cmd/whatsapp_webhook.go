@@ -20,8 +20,7 @@ import (
 	whatsappChannel "github.com/abhinavxd/libredesk/internal/inbox/channel/whatsapp"
 	imodels "github.com/abhinavxd/libredesk/internal/inbox/models"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
-	"github.com/abhinavxd/libredesk/internal/whatsapp"
-	wtmodels "github.com/abhinavxd/libredesk/internal/whatsapp/template/models"
+	"github.com/abhinavxd/libredesk/internal/wago"
 	"github.com/valyala/fasthttp"
 	"github.com/volatiletech/null/v9"
 	"github.com/zerodha/fastglue"
@@ -29,8 +28,7 @@ import (
 
 const (
 	whatsAppDefaultContactName = "Contact"
-	// Retry window for a status whose message row is missing. Older events reference a wamid that will never exist locally.
-	// Must exceed whatsAppReclaimMinIdle, since the first retry only happens after that idle period.
+	// Retry window for a status whose message row is missing. Older events reference an ID that will never exist locally.
 	whatsAppStatusNotFoundGrace = 30 * time.Minute
 
 	whatsAppMediaAttemptTimeout = 3 * time.Minute
@@ -49,36 +47,6 @@ func lockWhatsAppConversation(contactID, inboxID int) func() {
 	return whatsAppConversationLocks.lock(strconv.Itoa(contactID) + ":" + strconv.Itoa(inboxID))
 }
 
-func handleWhatsAppWebhookVerify(r *fastglue.Request) error {
-	app := r.Context.(*App)
-
-	inboxID, err := inboxIDFromPath(r)
-	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "invalid inbox id", nil, envelope.InputError)
-	}
-
-	mode := string(r.RequestCtx.QueryArgs().Peek("hub.mode"))
-	token := string(r.RequestCtx.QueryArgs().Peek("hub.verify_token"))
-	challenge := string(r.RequestCtx.QueryArgs().Peek("hub.challenge"))
-
-	if mode != "subscribe" {
-		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "invalid hub.mode", nil, envelope.InputError)
-	}
-
-	cfg, err := whatsAppConfigForInbox(app, inboxID)
-	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "inbox not found", nil, envelope.NotFoundError)
-	}
-
-	if cfg.WebhookVerifyToken == "" || token != cfg.WebhookVerifyToken {
-		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "verify token mismatch", nil, envelope.PermissionError)
-	}
-
-	r.RequestCtx.SetStatusCode(fasthttp.StatusOK)
-	r.RequestCtx.SetBodyString(challenge)
-	return nil
-}
-
 func handleWhatsAppWebhookEvent(r *fastglue.Request) error {
 	app := r.Context.(*App)
 
@@ -89,17 +57,17 @@ func handleWhatsAppWebhookEvent(r *fastglue.Request) error {
 
 	body := append([]byte(nil), r.RequestCtx.PostBody()...)
 
-	cfg, err := whatsAppConfigForInbox(app, inboxID)
-	if err != nil {
-		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "inbox not found", nil, envelope.NotFoundError)
+	if app.wagoClient == nil || !app.wagoClient.Configured() {
+		app.lo.Error("whatsapp webhook rejected: wago is not configured")
+		return r.SendErrorEnvelope(fasthttp.StatusServiceUnavailable, "wago is not configured", nil, envelope.GeneralError)
 	}
-	appSecret := cfg.AppSecret
-	if appSecret == "" {
-		app.lo.Error("whatsapp webhook rejected: app secret not configured", "inbox_id", inboxID)
-		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "webhook app secret not configured", nil, envelope.PermissionError)
+	secret := strings.TrimSpace(ko.String("wago.webhook_secret"))
+	if secret == "" {
+		app.lo.Error("whatsapp webhook rejected: wago webhook secret not configured")
+		return r.SendErrorEnvelope(fasthttp.StatusServiceUnavailable, "wago webhook secret not configured", nil, envelope.GeneralError)
 	}
 	signature := string(r.RequestCtx.Request.Header.Peek("X-Hub-Signature-256"))
-	if !whatsapp.VerifySignature(body, signature, appSecret) {
+	if !wago.VerifySignature(body, signature, secret) {
 		app.lo.Warn("whatsapp webhook signature verification failed", "inbox_id", inboxID)
 		return r.SendErrorEnvelope(fasthttp.StatusForbidden, "invalid signature", nil, envelope.PermissionError)
 	}
@@ -117,15 +85,14 @@ func handleWhatsAppWebhookEvent(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusServiceUnavailable, "whatsapp ingester unavailable", nil, envelope.GeneralError)
 	}
 	if err := ingester.Enqueue(inboxID, body); err != nil {
-		app.lo.Error("error enqueuing whatsapp webhook to durable stream, asking meta to retry", "inbox_id", inboxID, "error", err)
+		app.lo.Error("error enqueuing whatsapp webhook to durable stream, asking wago to retry", "inbox_id", inboxID, "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusServiceUnavailable, "busy, retry shortly", nil, envelope.GeneralError)
 	}
 
 	return r.SendEnvelope(map[string]string{"status": "ok"})
 }
 
-// processWhatsAppPayload applies every message/status/template event in one delivery. Returning an error retries the whole delivery.
-func processWhatsAppPayload(ctx context.Context, app *App, inboxID int, payload *whatsapp.WebhookPayload) error {
+func processWhatsAppPayload(ctx context.Context, app *App, inboxID int, payload *wago.WebhookPayload) error {
 	var errs []error
 
 	for _, msg := range payload.ExtractMessages() {
@@ -135,39 +102,14 @@ func processWhatsAppPayload(ctx context.Context, app *App, inboxID int, payload 
 		}
 	}
 
-	for _, st := range payload.ExtractStatuses() {
-		if err := app.conversation.ApplyWhatsAppStatus(st.MessageID, st.Status, st.Timestamp, st.UserMsg); err != nil {
-			if errors.Is(err, conversation.ErrMessageNotFound) && time.Since(st.Timestamp) > whatsAppStatusNotFoundGrace {
-				app.lo.Warn("dropping whatsapp status for unknown message", "wa_message_id", st.MessageID, "status", st.Status, "event_at", st.Timestamp)
-			} else {
-				app.lo.Error("error applying whatsapp status update", "wa_message_id", st.MessageID, "status", st.Status, "error", err)
-				errs = append(errs, err)
-			}
-		}
-	}
-
-	templateUpdates := payload.ExtractTemplateStatusUpdates()
-	if app.whatsappTemplate != nil && len(templateUpdates) > 0 {
-		wabaInboxes, err := whatsAppInboxIDsByWABA(app)
-		if err != nil {
-			app.lo.Error("error listing inboxes for template status updates", "error", err)
-			errs = append(errs, err)
-			wabaInboxes = map[string][]int{}
-		}
-		for _, ts := range templateUpdates {
-			ids := wabaInboxes[ts.WABAID]
-			if ts.WABAID == "" {
-				ids = []int{inboxID}
-			}
-			for _, ibID := range ids {
-				if err := app.whatsappTemplate.HandleStatusUpdate(ibID, ts.MetaTemplateID, ts.TemplateName, ts.Language, ts.Event, ts.Reason); err != nil {
-					app.lo.Error("error applying template status update", "inbox_id", ibID, "name", ts.TemplateName, "event", ts.Event, "error", err)
+	for _, ack := range payload.ExtractAcks() {
+		for _, id := range ack.MessageIDs {
+			if err := app.conversation.ApplyWhatsAppStatus(id, ack.Status, ack.Timestamp, ack.Error); err != nil {
+				if errors.Is(err, conversation.ErrMessageNotFound) && time.Since(ack.Timestamp) > whatsAppStatusNotFoundGrace {
+					app.lo.Warn("dropping whatsapp status for unknown message", "wa_message_id", id, "status", ack.Status, "event_at", ack.Timestamp)
+				} else {
+					app.lo.Error("error applying whatsapp status update", "wa_message_id", id, "status", ack.Status, "error", err)
 					errs = append(errs, err)
-					continue
-				}
-				// An edit skipped while the template was under review can now be applied.
-				if ts.TemplateName == wtmodels.CSATTemplateName(ibID) {
-					go ensureWhatsAppCSATTemplate(app, ibID)
 				}
 			}
 		}
@@ -176,17 +118,9 @@ func processWhatsAppPayload(ctx context.Context, app *App, inboxID int, payload 
 	return errors.Join(errs...)
 }
 
-func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsapp.ParsedMessage) error {
+func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m wago.ParsedMessage) error {
 	if m.ID == "" || m.From == "" {
 		return fmt.Errorf("missing message id or sender")
-	}
-
-	// Reactions and sync/welcome events would otherwise land as placeholder rows and reset the 24h window.
-	switch m.Type {
-	case "reaction", "ephemeral", "request_welcome":
-		return nil
-	case "system":
-		return applyWhatsAppSystemEvent(app, m)
 	}
 
 	if ing := app.ingester(); ing != nil {
@@ -194,11 +128,9 @@ func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsap
 		defer unlock()
 	}
 
-	// Meta posts all events of an app to one callback URL, so the URL's inbox ID is not authoritative.
-	inbRec, cfg, err := resolveWhatsAppInbox(app, inboxID, m.PhoneNumberID)
+	inbRec, err := resolveWhatsAppInbox(app, inboxID)
 	if errors.Is(err, errNoEnabledWhatsAppInbox) {
-		// Retrying cannot fix a disabled/unmatched inbox, so drop instead of poisoning the delivery.
-		app.lo.Warn("dropping whatsapp message: no enabled inbox for event", "url_inbox_id", inboxID, "phone_number_id", m.PhoneNumberID, "wa_message_id", m.ID)
+		app.lo.Warn("dropping whatsapp message: no enabled inbox for event", "url_inbox_id", inboxID, "wa_message_id", m.ID)
 		return nil
 	}
 	if err != nil {
@@ -206,7 +138,7 @@ func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsap
 	}
 	inboxID = inbRec.ID
 
-	app.lo.Debug("ingesting whatsapp message", "wa_message_id", m.ID, "type", m.Type, "media_id", m.MediaID, "mime", m.MediaMimeType, "context_id", m.ContextID)
+	app.lo.Debug("ingesting whatsapp message", "wa_message_id", m.ID, "type", m.Type, "media_path", m.MediaPath, "mime", m.MediaMIMEType, "context_id", m.ReplyToID)
 
 	contactID, err := upsertWhatsAppContact(app, m)
 	if err != nil {
@@ -220,14 +152,14 @@ func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsap
 		return nil
 	}
 
-	// Skip the media download up front when the message is already ingested (retries, Meta redeliveries).
+	// Skip the media download up front when the message is already ingested (retries, WAGO redeliveries).
 	if exists, err := app.conversation.AdvanceWhatsAppWindowForMessage(m.ID, m.Timestamp); err != nil {
 		return fmt.Errorf("repairing duplicate: %w", err)
 	} else if exists {
 		return nil
 	}
 
-	attachments, err := fetchWhatsAppAttachments(ctx, app, cfg, m)
+	attachments, err := fetchWhatsAppAttachments(ctx, app, m)
 	if err != nil {
 		return fmt.Errorf("downloading whatsapp media: %w", err)
 	}
@@ -267,7 +199,7 @@ func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsap
 	content, contentType := textPreview(m), cmodels.ContentTypeText
 
 	// The "[image]"-style placeholder only stays when the media download failed.
-	if m.Text == "" && m.Caption == "" && len(attachments) > 0 {
+	if m.Text == "" && len(attachments) > 0 {
 		content = ""
 	}
 
@@ -293,31 +225,12 @@ func ingestWhatsAppMessage(ctx context.Context, app *App, inboxID int, m whatsap
 	return nil
 }
 
-// applyWhatsAppSystemEvent repoints a contact's wa_id when the customer moves to a new number, so their replies keep threading to the same contact.
-func applyWhatsAppSystemEvent(app *App, m whatsapp.ParsedMessage) error {
-	if m.SystemType != "user_changed_number" || m.SystemNewWAID == "" || m.SystemNewWAID == m.From {
-		return nil
-	}
-	contactID, err := app.user.UpdateChannelIdentity(whatsappChannel.ChannelWhatsApp, m.From, m.SystemNewWAID)
-	if err != nil {
-		return fmt.Errorf("repointing whatsapp identity: %w", err)
-	}
-	if contactID == 0 {
-		app.lo.Warn("whatsapp number change not applied, new number already belongs to a contact", "old_wa_id", m.From, "new_wa_id", m.SystemNewWAID)
-		return nil
-	}
-	app.lo.Info("whatsapp contact changed number", "contact_id", contactID, "old_wa_id", m.From, "new_wa_id", m.SystemNewWAID)
-	return nil
-}
-
 // buildInboundMeta returns nil when there's nothing to record.
-func buildInboundMeta(app *App, m whatsapp.ParsedMessage) json.RawMessage {
+func buildInboundMeta(app *App, m wago.ParsedMessage) json.RawMessage {
 	patch := map[string]any{}
-
 	if m.Type == "unsupported" {
 		patch["wa_unsupported"] = true
 	}
-
 	if len(patch) == 0 {
 		return nil
 	}
@@ -330,37 +243,24 @@ func buildInboundMeta(app *App, m whatsapp.ParsedMessage) json.RawMessage {
 }
 
 // fetchWhatsAppAttachments returns (nil, nil) on a permanent (4xx) failure so a placeholder is stored. Any other error propagates for a queue retry.
-func fetchWhatsAppAttachments(ctx context.Context, app *App, cfg whatsappChannel.Config, m whatsapp.ParsedMessage) (attachment.Attachments, error) {
-	if m.MediaID == "" || app.whatsappClient == nil {
+func fetchWhatsAppAttachments(ctx context.Context, app *App, m wago.ParsedMessage) (attachment.Attachments, error) {
+	if m.MediaPath == "" || app.wagoClient == nil {
 		return nil, nil
 	}
-	acc := cfg.Account()
-
+	maxBytes := int64(app.consts.Load().(*constants).MaxFileUploadSizeMB) * 1024 * 1024
 	var (
-		info whatsapp.MediaInfo
 		body []byte
 		err  error
 	)
-	maxBytes := int64(app.consts.Load().(*constants).MaxFileUploadSizeMB) * 1024 * 1024
 	for attempt := 1; ; attempt++ {
 		dlCtx, cancel := context.WithTimeout(ctx, whatsAppMediaAttemptTimeout)
-		info, err = app.whatsappClient.GetMediaURL(dlCtx, acc, m.MediaID)
-		if err == nil {
-			// Meta will not send a smaller file on a retry, so store a placeholder rather than retrying.
-			if whatsapp.MediaExceedsCap(info, maxBytes) {
-				cancel()
-				app.lo.Warn("whatsapp media exceeds the configured upload limit, inserting placeholder",
-					"media_id", m.MediaID, "file_size", info.FileSize, "max_bytes", maxBytes)
-				return nil, nil
-			}
-			body, err = app.whatsappClient.DownloadMedia(dlCtx, acc, info.URL, maxBytes)
-		}
+		body, err = app.wagoClient.DownloadMedia(dlCtx, m.MediaPath, maxBytes)
 		cancel()
 		if err == nil {
 			break
 		}
-		if errors.Is(err, whatsapp.ErrMediaTooLarge) {
-			app.lo.Warn("whatsapp media exceeds the configured upload limit, inserting placeholder", "media_id", m.MediaID, "max_bytes", maxBytes)
+		if errors.Is(err, wago.ErrMediaTooLarge) {
+			app.lo.Warn("whatsapp media exceeds the configured upload limit, inserting placeholder", "media_path", m.MediaPath, "max_bytes", maxBytes)
 			return nil, nil
 		}
 		if ctx.Err() != nil {
@@ -368,13 +268,13 @@ func fetchWhatsAppAttachments(ctx context.Context, app *App, cfg whatsappChannel
 		}
 		if attempt >= whatsAppMediaMaxAttempts {
 			if isPermanentMediaError(err) {
-				app.lo.Warn("whatsapp media permanently unavailable, inserting placeholder", "media_id", m.MediaID, "attempts", attempt, "error", err)
+				app.lo.Warn("whatsapp media permanently unavailable, inserting placeholder", "media_path", m.MediaPath, "attempts", attempt, "error", err)
 				return nil, nil
 			}
-			app.lo.Warn("error downloading whatsapp media, will retry job", "media_id", m.MediaID, "attempts", attempt, "error", err)
+			app.lo.Warn("error downloading whatsapp media, will retry job", "media_path", m.MediaPath, "attempts", attempt, "error", err)
 			return nil, err
 		}
-		app.lo.Warn("error downloading whatsapp media, retrying", "media_id", m.MediaID, "attempt", attempt, "error", err)
+		app.lo.Warn("error downloading whatsapp media, retrying", "media_path", m.MediaPath, "attempt", attempt, "error", err)
 		select {
 		case <-ctx.Done():
 			return nil, nil
@@ -383,15 +283,15 @@ func fetchWhatsAppAttachments(ctx context.Context, app *App, cfg whatsappChannel
 	}
 
 	if len(body) == 0 {
-		app.lo.Warn("whatsapp media downloaded empty, inserting placeholder", "media_id", m.MediaID, "type", m.Type)
+		app.lo.Warn("whatsapp media downloaded empty, inserting placeholder", "media_path", m.MediaPath, "type", m.Type)
 		return nil, nil
 	}
 
-	contentType := info.MimeType
+	contentType := m.MediaMIMEType
 	if contentType == "" {
-		contentType = m.MediaMimeType
+		contentType = "application/octet-stream"
 	}
-	filename := m.Filename
+	filename := m.MediaFilename
 	if filename == "" {
 		filename = defaultMediaFilename(m.Type, contentType)
 	}
@@ -408,14 +308,14 @@ func fetchWhatsAppAttachments(ctx context.Context, app *App, cfg whatsappChannel
 }
 
 func isPermanentMediaError(err error) bool {
-	var me *whatsapp.MetaAPIError
-	if errors.As(err, &me) {
-		// 408 and 429 are 4xx but retryable. 401/403 recover once the operator replaces the token. 5xx are transient.
-		if me.StatusCode == http.StatusRequestTimeout || me.StatusCode == http.StatusTooManyRequests ||
-			me.StatusCode == http.StatusUnauthorized || me.StatusCode == http.StatusForbidden {
+	var apiErr *wago.APIError
+	if errors.As(err, &apiErr) {
+		// 408 and 429 are 4xx but retryable. 401/403 recover once the operator fixes WAGO credentials. 5xx are transient.
+		if apiErr.StatusCode == http.StatusRequestTimeout || apiErr.StatusCode == http.StatusTooManyRequests ||
+			apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
 			return false
 		}
-		return me.StatusCode >= 400 && me.StatusCode < 500
+		return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -447,7 +347,7 @@ func defaultMediaFilename(messageType, mime string) string {
 	return "attachment." + ext
 }
 
-func upsertWhatsAppContact(app *App, m whatsapp.ParsedMessage) (int, error) {
+func upsertWhatsAppContact(app *App, m wago.ParsedMessage) (int, error) {
 	first, last := splitName(m.ContactName)
 	contact := umodels.User{
 		Type:      umodels.UserTypeContact,
@@ -478,12 +378,9 @@ func splitName(name string) (string, string) {
 	return first, last
 }
 
-func textPreview(m whatsapp.ParsedMessage) string {
+func textPreview(m wago.ParsedMessage) string {
 	if m.Text != "" {
 		return m.Text
-	}
-	if m.Caption != "" {
-		return m.Caption
 	}
 	switch m.Type {
 	case "image":
@@ -497,7 +394,6 @@ func textPreview(m whatsapp.ParsedMessage) string {
 	case "sticker":
 		return "[sticker]"
 	case "unsupported":
-		// Meta refuses to deliver some message types (e.g. animated stickers) to the Cloud API.
 		return "[unsupported message: not delivered by WhatsApp]"
 	}
 	return "[whatsapp message]"
@@ -511,121 +407,56 @@ func inboxIDFromPath(r *fastglue.Request) (int, error) {
 	return strconv.Atoi(raw)
 }
 
-// whatsAppInboxIDsByWABA maps each non-empty WABA id to its enabled WhatsApp inbox IDs.
-func whatsAppInboxIDsByWABA(app *App) (map[string][]int, error) {
-	out := map[string][]int{}
-	if err := forEachEnabledWhatsAppInbox(app, func(rec imodels.Inbox, cfg whatsappChannel.Config) bool {
-		if cfg.WABAID != "" {
-			out[cfg.WABAID] = append(out[cfg.WABAID], rec.ID)
-		}
+func resolveWhatsAppInbox(app *App, urlInboxID int) (imodels.Inbox, error) {
+	if rec, err := app.inbox.GetDBRecord(urlInboxID); err == nil && rec.Enabled && rec.Channel == whatsappChannel.ChannelWhatsApp {
+		return rec, nil
+	}
+
+	var enabled []imodels.Inbox
+	if err := forEachEnabledWhatsAppInbox(app, func(rec imodels.Inbox) bool {
+		enabled = append(enabled, rec)
 		return true
 	}); err != nil {
-		return nil, err
+		return imodels.Inbox{}, err
 	}
-	return out, nil
+	switch len(enabled) {
+	case 0:
+		return imodels.Inbox{}, errNoEnabledWhatsAppInbox
+	case 1:
+		if enabled[0].ID != urlInboxID {
+			app.lo.Info("routing whatsapp message to the only enabled inbox", "url_inbox_id", urlInboxID, "resolved_inbox_id", enabled[0].ID)
+		}
+		return enabled[0], nil
+	default:
+		return imodels.Inbox{}, fmt.Errorf("multiple enabled whatsapp inboxes found; exactly one is supported")
+	}
 }
 
-func resolveWhatsAppInbox(app *App, urlInboxID int, phoneNumberID string) (imodels.Inbox, whatsappChannel.Config, error) {
-	rec, urlErr := app.inbox.GetDBRecord(urlInboxID)
-	var cfg whatsappChannel.Config
-	if urlErr == nil {
-		cfg, urlErr = whatsAppConfigFromRecord(rec)
-	}
-	if urlErr == nil && rec.Enabled && (phoneNumberID == "" || cfg.PhoneNumberID == phoneNumberID) {
-		return rec, cfg, nil
-	}
-
-	// A bad URL inbox must not block routing by the payload's phone_number_id.
-	if phoneNumberID != "" {
-		var (
-			found    bool
-			foundRec imodels.Inbox
-			foundCfg whatsappChannel.Config
-		)
-		if err := forEachEnabledWhatsAppInbox(app, func(r imodels.Inbox, c whatsappChannel.Config) bool {
-			if c.PhoneNumberID != phoneNumberID {
-				return true
-			}
-			foundRec, foundCfg, found = r, c, true
-			return false
-		}); err != nil {
-			return imodels.Inbox{}, whatsappChannel.Config{}, err
-		}
-		if found {
-			if foundRec.ID != urlInboxID {
-				app.lo.Info("routing whatsapp message by phone_number_id", "url_inbox_id", urlInboxID, "resolved_inbox_id", foundRec.ID)
-			}
-			return foundRec, foundCfg, nil
-		}
-	}
-
-	if urlErr != nil {
-		return imodels.Inbox{}, whatsappChannel.Config{}, urlErr
-	}
-	return imodels.Inbox{}, whatsappChannel.Config{}, errNoEnabledWhatsAppInbox
-}
-
-// forEachEnabledWhatsAppInbox invokes fn with each enabled WhatsApp inbox's record and decoded config. Returning false stops iteration.
-func forEachEnabledWhatsAppInbox(app *App, fn func(rec imodels.Inbox, cfg whatsappChannel.Config) bool) error {
+// forEachEnabledWhatsAppInbox invokes fn with each enabled WhatsApp inbox record. Returning false stops iteration.
+func forEachEnabledWhatsAppInbox(app *App, fn func(rec imodels.Inbox) bool) error {
 	inboxes, err := app.inbox.GetAll()
 	if err != nil {
-		// GetAll fails wholesale when any single row cannot be decoded, so an empty result here is not "no inboxes".
 		return fmt.Errorf("listing inboxes: %w", err)
 	}
 	for _, rec := range inboxes {
 		if rec.Channel != whatsappChannel.ChannelWhatsApp || !rec.Enabled {
 			continue
 		}
-		var cfg whatsappChannel.Config
-		if err := json.Unmarshal(rec.Config, &cfg); err != nil {
-			app.lo.Warn("skipping whatsapp inbox with unparseable config", "inbox_id", rec.ID, "error", err)
-			continue
-		}
-		if !fn(rec, cfg) {
+		if !fn(rec) {
 			return nil
 		}
 	}
 	return nil
 }
 
-// whatsAppConfigForInbox prefers the running inbox's in-memory config. The DB fallback covers disabled or unregistered inboxes.
-func whatsAppConfigForInbox(app *App, inboxID int) (whatsappChannel.Config, error) {
-	if inb, err := app.inbox.Get(inboxID); err == nil {
-		if wa, ok := inb.(interface{ Config() whatsappChannel.Config }); ok {
-			return wa.Config(), nil
-		}
-	}
-	rec, err := app.inbox.GetDBRecord(inboxID)
-	if err != nil {
-		return whatsappChannel.Config{}, err
-	}
-	return whatsAppConfigFromRecord(rec)
-}
-
-func whatsAppConfigFromRecord(rec imodels.Inbox) (whatsappChannel.Config, error) {
-	if rec.Channel != whatsappChannel.ChannelWhatsApp {
-		return whatsappChannel.Config{}, fmt.Errorf("inbox %d is not a whatsapp inbox", rec.ID)
-	}
-	var cfg whatsappChannel.Config
-	if err := json.Unmarshal(rec.Config, &cfg); err != nil {
-		return whatsappChannel.Config{}, fmt.Errorf("decoding whatsapp inbox config: %w", err)
-	}
-	return cfg, nil
-}
-
-// markWhatsAppMessageRead sends a read receipt to Meta for an inbound message. Best-effort, logs and swallows failures.
-func markWhatsAppMessageRead(app *App, inboxID int, sourceID string) {
-	if app.whatsappClient == nil || sourceID == "" {
+// markWhatsAppMessageRead sends a read receipt to WAGO for an inbound message. Best-effort, logs and swallows failures.
+func markWhatsAppMessageRead(app *App, inboxID int, sourceID, phone string) {
+	if app.wagoClient == nil || sourceID == "" || phone == "" {
 		return
 	}
-	cfg, err := whatsAppConfigForInbox(app, inboxID)
-	if err != nil {
-		app.lo.Error("error fetching inbox config for whatsapp read receipt", "inbox_id", inboxID, "error", err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), whatsappChannel.MetaCallTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), whatsappChannel.WagoCallTimeout)
 	defer cancel()
-	if err := app.whatsappClient.MarkRead(ctx, cfg.Account(), sourceID); err != nil {
+	if err := app.wagoClient.MarkRead(ctx, sourceID, phone); err != nil {
 		app.lo.Warn("error marking whatsapp message read", "inbox_id", inboxID, "source_id", sourceID, "error", err)
 	}
 }

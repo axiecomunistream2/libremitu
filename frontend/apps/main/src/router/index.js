@@ -366,30 +366,6 @@ const routes = [
             ]
           },
           {
-            path: 'whatsapp/templates',
-            meta: { titleKey: 'admin.whatsappTemplates.title' },
-            children: [
-              {
-                path: '',
-                name: 'whatsapp-templates',
-                component: () => import('@main/views/admin/whatsapp/WhatsAppTemplateList.vue')
-              },
-              {
-                path: 'new',
-                name: 'whatsapp-template-new',
-                component: () => import('@main/views/admin/whatsapp/CreateEditWhatsAppTemplate.vue'),
-                meta: { titleKey: 'globals.messages.newTemplate' }
-              },
-              {
-                path: ':id/edit',
-                name: 'whatsapp-template-edit',
-                component: () => import('@main/views/admin/whatsapp/CreateEditWhatsAppTemplate.vue'),
-                props: true,
-                meta: { titleKey: 'globals.messages.edit' }
-              }
-            ]
-          },
-          {
             path: 'notification',
             component: () => import('@main/features/admin/notification/NotificationSetting.vue'),
             meta: { titleKey: 'globals.terms.notification', titleCount: 2 }

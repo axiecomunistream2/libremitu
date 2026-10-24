@@ -171,7 +171,6 @@ const submitLiveChatForm = (values) => {
 const submitWhatsAppForm = (values) => {
   const payload = {
     name: values.name,
-    from: values.from,
     channel: 'whatsapp',
     enabled: values.enabled ?? true,
     csat_enabled: values.csat_enabled ?? false,

@@ -101,6 +101,20 @@ user = ""
 password = ""
 db = 0
 
+# WAGO (go-whatsapp-web-multidevice) connection. Exactly one device is supported.
+# The matching env vars are LIBREDESK_WAGO__BASE_URL, LIBREDESK_WAGO__DEVICE_ID,
+# LIBREDESK_WAGO__USERNAME, LIBREDESK_WAGO__PASSWORD and LIBREDESK_WAGO__WEBHOOK_SECRET.
+[wago]
+# WAGO base URL, optionally including a subpath such as https://host/gowa.
+base_url = ""
+# Device ID shown by WAGO's /devices endpoint.
+device_id = ""
+# Basic Auth credentials. Leave empty when WAGO has no basic auth configured.
+username = ""
+password = ""
+# Must match WAGO's WHATSAPP_WEBHOOK_SECRET. The webhook is rejected when this is empty.
+webhook_secret = ""
+
 [message]
 # Number of workers processing outgoing message queue
 outgoing_queue_workers = 10

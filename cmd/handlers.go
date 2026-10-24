@@ -396,19 +396,16 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.POST("/api/v1/widget/chat/conversations/{uuid}/handoff-form", rateLimit(widgetAuth(handleChatSubmitHandoffForm), "widget"))
 	g.POST("/api/v1/widget/media/upload", rateLimit(widgetAuth(handleWidgetMediaUpload), "widget"))
 
-	// WhatsApp.
-	g.GET("/webhooks/whatsapp/{inbox_id}", rateLimit(handleWhatsAppWebhookVerify, "public"))
+	// WhatsApp (WAGO).
 	g.POST("/webhooks/whatsapp/{inbox_id}", handleWhatsAppWebhookEvent)
 
 	g.GET("/api/v1/whatsapp/contacts/{contact_id}/open-conversation", perm(handleGetWhatsAppOpenConversation, "conversations:read"))
 
-	// WhatsApp templates.
-	g.GET("/api/v1/whatsapp/templates", auth(handleListWhatsAppTemplates))
-	g.GET("/api/v1/whatsapp/templates/{id}", perm(handleGetWhatsAppTemplate, "inboxes:manage"))
-	g.POST("/api/v1/whatsapp/templates", perm(handleCreateWhatsAppTemplate, "inboxes:manage"))
-	g.PUT("/api/v1/whatsapp/templates/{id}", perm(handleUpdateWhatsAppTemplate, "inboxes:manage"))
-	g.DELETE("/api/v1/whatsapp/templates/{id}", perm(handleDeleteWhatsAppTemplate, "inboxes:manage"))
-	g.POST("/api/v1/whatsapp/templates/sync", perm(handleSyncWhatsAppTemplates, "inboxes:manage"))
+	// WAGO device management.
+	g.GET("/api/v1/wago/device", perm(handleWagoDevice, "inboxes:manage"))
+	g.POST("/api/v1/wago/device/login", perm(handleWagoLogin, "inboxes:manage"))
+	g.POST("/api/v1/wago/device/reconnect", perm(handleWagoReconnect, "inboxes:manage"))
+	g.POST("/api/v1/wago/device/logout", perm(handleWagoLogout, "inboxes:manage"))
 
 	// getAndHead registers both methods: uptime checkers and link validators probe with HEAD.
 	getAndHead := func(path string, h fastglue.FastRequestHandler) {

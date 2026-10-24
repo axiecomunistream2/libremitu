@@ -53,28 +53,26 @@ type tagsUpdateReq struct {
 }
 
 type createConversationRequest struct {
-	InboxID                int               `json:"inbox_id"`
-	AssignedAgentID        int               `json:"agent_id"`
-	AssignedTeamID         int               `json:"team_id"`
-	Email                  string            `json:"contact_email"`
-	CC                     []string          `json:"cc"`
-	BCC                    []string          `json:"bcc"`
-	FirstName              string            `json:"first_name"`
-	LastName               string            `json:"last_name"`
-	ExternalUserID         string            `json:"external_user_id"`
-	ReuseContact           bool              `json:"reuse_contact"`
-	Subject                string            `json:"subject"`
-	Content                string            `json:"content"`
-	SendFrom               string            `json:"send_from"`
-	Attachments            []int             `json:"attachments"`
-	Initiator              string            `json:"initiator"` // "contact" | "agent"
-	SourceID               string            `json:"source_id"` // RFC 5322 Message-ID of the inbound message. Stored on the created contact message so replies thread on it. Contact-initiated only.
-	CustomAttributes       map[string]any    `json:"custom_attributes"`
-	ContactID              int               `json:"contact_id"`
-	PhoneNumber            string            `json:"phone_number"`
-	PhoneNumberCountryCode string            `json:"phone_number_country_code"`
-	WhatsAppTemplateID     int               `json:"whatsapp_template_id"`
-	WhatsAppTemplateParams map[string]string `json:"whatsapp_template_params"`
+	InboxID                int            `json:"inbox_id"`
+	AssignedAgentID        int            `json:"agent_id"`
+	AssignedTeamID         int            `json:"team_id"`
+	Email                  string         `json:"contact_email"`
+	CC                     []string       `json:"cc"`
+	BCC                    []string       `json:"bcc"`
+	FirstName              string         `json:"first_name"`
+	LastName               string         `json:"last_name"`
+	ExternalUserID         string         `json:"external_user_id"`
+	ReuseContact           bool           `json:"reuse_contact"`
+	Subject                string         `json:"subject"`
+	Content                string         `json:"content"`
+	SendFrom               string         `json:"send_from"`
+	Attachments            []int          `json:"attachments"`
+	Initiator              string         `json:"initiator"` // "contact" | "agent"
+	SourceID               string         `json:"source_id"` // RFC 5322 Message-ID of the inbound message. Stored on the created contact message so replies thread on it. Contact-initiated only.
+	CustomAttributes       map[string]any `json:"custom_attributes"`
+	ContactID              int            `json:"contact_id"`
+	PhoneNumber            string         `json:"phone_number"`
+	PhoneNumberCountryCode string         `json:"phone_number_country_code"`
 }
 
 type whatsAppOpenConversationResponse struct {
@@ -470,9 +468,10 @@ func handleUpdateConversationAssigneeLastSeen(r *fastglue.Request) error {
 	var (
 		readInboxID  int
 		readSourceID string
+		readPhone    string
 	)
 	if conv.InboxChannel == whatsappChannel.ChannelWhatsApp {
-		readInboxID, readSourceID, err = app.conversation.WhatsAppReadReceiptTarget(uuid, auser.ID, req.MessageUUID)
+		readInboxID, readSourceID, readPhone, err = app.conversation.WhatsAppReadReceiptTarget(uuid, auser.ID, req.MessageUUID)
 		if err != nil {
 			app.lo.Error("error resolving whatsapp read receipt target", "conversation_uuid", uuid, "error", err)
 		}
@@ -484,7 +483,7 @@ func handleUpdateConversationAssigneeLastSeen(r *fastglue.Request) error {
 	}
 
 	if readSourceID != "" {
-		go markWhatsAppMessageRead(app, readInboxID, readSourceID)
+		go markWhatsAppMessageRead(app, readInboxID, readSourceID, readPhone)
 	}
 	state := map[string]any{"conversation_uuid": uuid, "last_seen_at": read.LastSeenAt, "read_version": read.ReadVersion}
 	app.conversation.BroadcastConversationRead(auser.ID, state)
@@ -984,17 +983,11 @@ func handleCreateConversation(r *fastglue.Request) error {
 		app.conversation.UpdateConversationUserAssignee(conversationUUID, req.AssignedAgentID, user)
 	}
 
-	// WhatsApp is always an agent-initiated template. Email follows the initiator.
+	// WhatsApp replies are agent-initiated. Email follows the initiator.
 	agentInitiated := true
 	var sendErr error
 	switch {
-	case channel == whatsappChannel.ChannelWhatsApp:
-		meta := map[string]any{"whatsapp_template_id": req.WhatsAppTemplateID}
-		if len(req.WhatsAppTemplateParams) > 0 {
-			meta["whatsapp_template_params"] = req.WhatsAppTemplateParams
-		}
-		_, sendErr = app.conversation.QueueReply(media, req.InboxID, auser.ID, contactID, conversationUUID, "" /** content **/, nil /** to **/, nil /** cc **/, nil /** bcc **/, "" /** sendFrom **/, meta)
-	case req.Initiator == umodels.UserTypeAgent:
+	case channel == whatsappChannel.ChannelWhatsApp || req.Initiator == umodels.UserTypeAgent:
 		_, sendErr = app.conversation.QueueReply(media, req.InboxID, auser.ID, contactID, conversationUUID, req.Content, to, req.CC, req.BCC, req.SendFrom, map[string]any{} /** meta **/)
 	case req.Initiator == umodels.UserTypeContact:
 		agentInitiated = false
@@ -1073,9 +1066,6 @@ func validateCreateConversationRequest(req createConversationRequest, app *App) 
 
 	switch inbox.Channel {
 	case whatsappChannel.ChannelWhatsApp:
-		if req.WhatsAppTemplateID <= 0 {
-			return "", envelope.NewError(envelope.InputError, app.i18n.Ts("globals.messages.required", "name", "`whatsapp_template_id`"), nil)
-		}
 		if req.ContactID <= 0 {
 			if req.PhoneNumber == "" {
 				return "", envelope.NewError(envelope.InputError, app.i18n.Ts("globals.messages.required", "name", "`phone_number`"), nil)

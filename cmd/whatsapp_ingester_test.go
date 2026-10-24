@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abhinavxd/libredesk/internal/whatsapp"
+	"github.com/abhinavxd/libredesk/internal/wago"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/valyala/fasthttp"
@@ -30,7 +30,7 @@ func TestEnqueueAndConsume(t *testing.T) {
 		t.Fatalf("newWhatsAppIngester: %v", err)
 	}
 
-	body := []byte(`{"object":"whatsapp_business_account","entry":[]}`)
+	body := []byte(`{"event":"message.ack","payload":{"ids":["x"],"receipt_type":"read"}}`)
 	if err := ing.Enqueue(9, body); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -219,11 +219,11 @@ func testIngesterApp(t *testing.T) (*App, *miniredis.Miniredis) {
 	return app, mr
 }
 
-func parsedMessage(typ string) whatsapp.ParsedMessage {
-	return whatsapp.ParsedMessage{ID: "wamid.X", From: "919876543210", Type: typ}
+func parsedMessage(typ string) wago.ParsedMessage {
+	return wago.ParsedMessage{ID: "wamid.X", From: "919876543210", Type: typ}
 }
 
-// No unique constraint backs source_id, so this lock is the only thing suppressing a Meta redelivery.
+// No unique constraint backs source_id, so this lock is the only thing suppressing a WAGO redelivery.
 func TestSenderLockSerializesCheckAndInsert(t *testing.T) {
 	app, _ := testIngesterApp(t)
 	ing, err := newWhatsAppIngester(app)

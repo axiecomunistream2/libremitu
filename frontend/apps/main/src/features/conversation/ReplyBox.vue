@@ -189,7 +189,7 @@ import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { getTextFromHTML } from '@shared-ui/utils/string'
 import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
 import { MACRO_CONTEXT } from '@main/constants/conversation'
-import { WHATSAPP_CHANNEL, isWhatsAppWindowOpen } from '@main/features/conversation/whatsappTemplate'
+const WHATSAPP_CHANNEL = 'whatsapp'
 import { useUserStore } from '@main/stores/user'
 import { useDraftManager } from '@main/composables/useDraftManager'
 import api from '@main/api'
@@ -529,16 +529,6 @@ const processSend = async (
     deferredStatus.value = statusToSet
     showMissingTagsWarning.value = true
     return
-  }
-
-  if (!isPrivate && conversationStore.current.inbox_channel === WHATSAPP_CHANNEL) {
-    if (!isWhatsAppWindowOpen(conversationStore.current)) {
-      emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
-        variant: 'destructive',
-        description: t('conversation.whatsapp.error.windowClosed')
-      })
-      return
-    }
   }
 
   if (!isPrivate && conversationStore.current.inbox_channel === 'email') {

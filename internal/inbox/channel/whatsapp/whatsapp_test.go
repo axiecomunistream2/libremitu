@@ -3,7 +3,6 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,59 +13,40 @@ import (
 
 	"github.com/abhinavxd/libredesk/internal/attachment"
 	"github.com/abhinavxd/libredesk/internal/conversation/models"
-	"github.com/abhinavxd/libredesk/internal/whatsapp"
+	"github.com/abhinavxd/libredesk/internal/wago"
 	"github.com/zerodha/logf"
 )
 
-func TestConfigAccount(t *testing.T) {
-	cfg := Config{
-		PhoneNumberID: "PN1",
-		WABAID:        "WABA1",
-		AccessToken:   "TOKEN",
-		AppSecret:     "SECRET",
-		APIVersion:    "v26.0",
-	}
-	acc := cfg.Account()
-	if acc.PhoneNumberID != "PN1" || acc.WABAID != "WABA1" || acc.AccessToken != "TOKEN" || acc.AppSecret != "SECRET" || acc.APIVersion != "v26.0" {
-		t.Fatalf("unexpected account: %+v", acc)
-	}
-	// The CSAT fields are libredesk-side and must not leak into Meta calls.
-	if acc.Version() != "v26.0" {
-		t.Fatalf("unexpected version %q", acc.Version())
-	}
+func testLogger() *logf.Logger {
+	lo := logf.New(logf.Opts{Level: logf.FatalLevel})
+	return &lo
+}
+
+func testClient(t *testing.T, serverURL string) *wago.Client {
+	t.Helper()
+	return wago.New(testLogger(), wago.Opts{BaseURL: serverURL, DeviceID: "dev-1", Username: "u", Password: "p"})
 }
 
 func TestNew(t *testing.T) {
-	client := whatsapp.New(testLogger())
 	tests := []struct {
 		name    string
 		opts    Opts
 		wantErr string
 	}{
-		{
-			name:    "no client",
-			opts:    Opts{ID: 1, Config: Config{PhoneNumberID: "PN1", AccessToken: "T"}, Lo: testLogger()},
-			wantErr: "client is required",
-		},
-		{
-			name:    "no phone number id",
-			opts:    Opts{ID: 1, Config: Config{AccessToken: "T"}, Client: client, Lo: testLogger()},
-			wantErr: "phone_number_id and access_token are required",
-		},
-		{
-			name:    "no access token",
-			opts:    Opts{ID: 1, Config: Config{PhoneNumberID: "PN1"}, Client: client, Lo: testLogger()},
-			wantErr: "phone_number_id and access_token are required",
-		},
-		{
-			name:    "no logger",
-			opts:    Opts{ID: 1, Config: Config{PhoneNumberID: "PN1", AccessToken: "T"}, Client: client},
-			wantErr: "logger is required",
-		},
+		{"no client", Opts{Lo: testLogger()}, "base_url and device_id are required"},
+		{"missing logger", Opts{Client: testClient(t, "https://wago.example.com")}, "logger is required"},
+		{"ok", Opts{Client: testClient(t, "https://wago.example.com"), Lo: testLogger()}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := New(nil, tc.opts); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			_, err := New(nil, tc.opts)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("expected %q, got %v", tc.wantErr, err)
 			}
 		})
@@ -74,551 +54,219 @@ func TestNew(t *testing.T) {
 }
 
 func TestInboxAccessors(t *testing.T) {
-	inb := testInbox(t, nil, nil)
-	if inb.Identifier() != 7 {
-		t.Fatalf("unexpected id %d", inb.Identifier())
-	}
-	if inb.Name() != "WA Inbox" {
-		t.Fatalf("unexpected name %q", inb.Name())
-	}
-	if inb.Channel() != ChannelWhatsApp {
-		t.Fatalf("unexpected channel %q", inb.Channel())
-	}
-	if inb.Config().PhoneNumberID != "PN1" {
-		t.Fatalf("unexpected config %+v", inb.Config())
-	}
-	// The email template machinery reads these, and WhatsApp has no address to give it.
-	if inb.FromAddress() != "" || inb.ReplyToAddress() != "" || inb.FromNameTemplate() != "" {
-		t.Fatal("expected empty email fields")
-	}
-	if err := inb.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	// Inbound arrives over the webhook, so Receive does nothing.
-	if err := inb.Receive(context.Background()); err != nil {
-		t.Fatalf("receive: %v", err)
-	}
-}
-
-func TestSendText(t *testing.T) {
-	var body map[string]any
-	updater := &fakeSourceUpdater{}
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		decodeBody(t, r, &body)
-		writeSendResponse(w, "wamid.OUT1")
-	}, updater)
-
-	err := inb.Send(models.OutboundMessage{
-		UUID:        "msg-uuid",
-		Content:     "<p>hello <b>there</b></p>",
-		ContentType: models.ContentTypeHTML,
-		Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"919876543210"}}`),
-	})
+	w, err := New(nil, Opts{ID: 7, Name: "Support", Config: Config{CSATMessage: "Rate us"}, Client: testClient(t, "https://wago.example.com"), Lo: testLogger()})
 	if err != nil {
-		t.Fatalf("send: %v", err)
+		t.Fatal(err)
 	}
-	if body["type"] != "text" {
-		t.Fatalf("expected a text send, got %v", body)
+	if w.Identifier() != 7 || w.Name() != "Support" || w.Channel() != ChannelWhatsApp || w.Config().CSATMessage != "Rate us" {
+		t.Fatalf("unexpected inbox accessors: %+v", w)
 	}
-	if got := body["text"].(map[string]any)["body"].(string); strings.Contains(got, "<") {
-		t.Fatalf("HTML must be flattened before it reaches WhatsApp, got %q", got)
+	if w.FromAddress() != "" || w.ReplyToAddress() != "" || w.FromNameTemplate() != "" {
+		t.Fatal("whatsapp inbox must not expose email addresses")
 	}
-	// The Meta message id is what later status webhooks are matched on.
-	if updater.uuid != "msg-uuid" || updater.sourceID != "wamid.OUT1" {
-		t.Fatalf("unexpected source id update: %+v", updater)
-	}
-}
-
-func TestSendTemplate(t *testing.T) {
-	var body map[string]any
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		decodeBody(t, r, &body)
-		writeSendResponse(w, "wamid.OUT2")
-	}, &fakeSourceUpdater{})
-
-	meta := SendMeta{
-		ToPhone:             "919876543210",
-		TemplateName:        "order_update",
-		TemplateLanguage:    "en_US",
-		TemplateBodyContent: "Hi {{name}}",
-		TemplateParams:      map[string]string{"body:name": "Ravi"},
-	}
-	raw, _ := json.Marshal(map[string]any{"whatsapp": meta})
-	if err := inb.Send(models.OutboundMessage{UUID: "u", Meta: raw}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	tmpl := body["template"].(map[string]any)
-	if tmpl["name"] != "order_update" {
-		t.Fatalf("unexpected template: %v", tmpl)
-	}
-	if len(tmpl["components"].([]any)) != 1 {
-		t.Fatalf("expected the body component, got %v", tmpl["components"])
-	}
-}
-
-// A template send wins over any free-form content on the same message.
-func TestSendTemplateTakesPrecedenceOverContent(t *testing.T) {
-	var body map[string]any
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		decodeBody(t, r, &body)
-		writeSendResponse(w, "wamid.OUT3")
-	}, nil)
-	raw, _ := json.Marshal(map[string]any{"whatsapp": SendMeta{ToPhone: "91", TemplateName: "t", TemplateLanguage: "en_US"}})
-	if err := inb.Send(models.OutboundMessage{UUID: "u", TextContent: "free form", Meta: raw}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if body["type"] != "template" {
-		t.Fatalf("expected a template send, got %v", body["type"])
-	}
-}
-
-func TestSendAttachment(t *testing.T) {
-	var (
-		uploaded string
-		sent     map[string]any
-	)
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/media") {
-			r.ParseMultipartForm(1 << 20)
-			uploaded = r.MultipartForm.File["file"][0].Filename
-			writeJSONBody(w, map[string]string{"id": "MEDIAUP1"})
-			return
-		}
-		decodeBody(t, r, &sent)
-		writeSendResponse(w, "wamid.OUT4")
-	}, nil)
-
-	err := inb.Send(models.OutboundMessage{
-		UUID:        "u",
-		TextContent: "see attached",
-		Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"919876543210"}}`),
-		Attachments: attachment.Attachments{{Name: "invoice.pdf", ContentType: "application/pdf", Content: []byte("pdfbytes"), Size: 8}},
-	})
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if uploaded != "invoice.pdf" {
-		t.Fatalf("unexpected upload %q", uploaded)
-	}
-	doc := sent["document"].(map[string]any)
-	if sent["type"] != "document" || doc["id"] != "MEDIAUP1" || doc["caption"] != "see attached" || doc["filename"] != "invoice.pdf" {
-		t.Fatalf("unexpected send payload: %v", sent)
-	}
-}
-
-func TestSendAttachmentFailures(t *testing.T) {
-	tests := []struct {
-		name        string
-		message     models.OutboundMessage
-		handler     http.HandlerFunc
-		wantErrPart string
-	}{
-		{
-			name: "two attachments",
-			message: models.OutboundMessage{
-				UUID: "u",
-				Meta: json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`),
-				Attachments: attachment.Attachments{
-					{Name: "a.pdf", ContentType: "application/pdf", Size: 1},
-					{Name: "b.pdf", ContentType: "application/pdf", Size: 1},
-				},
-			},
-			wantErrPart: "one attachment per message",
-		},
-		{
-			name: "unsupported type",
-			message: models.OutboundMessage{
-				UUID:        "u",
-				Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`),
-				Attachments: attachment.Attachments{{Name: "logs.zip", ContentType: "application/zip", Size: 1}},
-			},
-			wantErrPart: "can't send these files",
-		},
-		{
-			name: "upload rejected by meta",
-			message: models.OutboundMessage{
-				UUID:        "u",
-				Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`),
-				Attachments: attachment.Attachments{{Name: "a.pdf", ContentType: "application/pdf", Content: []byte("x"), Size: 1}},
-			},
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(400)
-				w.Write([]byte(`{"error":{"message":"too big","code":100}}`))
-			},
-			wantErrPart: "uploading attachment to meta",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			inb := testInbox(t, tc.handler, nil)
-			err := inb.Send(tc.message)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrPart) {
-				t.Fatalf("expected %q, got %v", tc.wantErrPart, err)
-			}
-		})
-	}
-}
-
-func TestSendRejectsUnusableMessages(t *testing.T) {
-	tests := []struct {
-		name        string
-		message     models.OutboundMessage
-		wantErrPart string
-	}{
-		{
-			name:        "no recipient",
-			message:     models.OutboundMessage{UUID: "u", TextContent: "hi"},
-			wantErrPart: "missing recipient phone number",
-		},
-		{
-			name:        "malformed meta",
-			message:     models.OutboundMessage{UUID: "u", Meta: json.RawMessage(`{"whatsapp":"not an object"}`)},
-			wantErrPart: "parsing whatsapp send meta",
-		},
-		{
-			name:        "nothing to send",
-			message:     models.OutboundMessage{UUID: "u", Meta: json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`)},
-			wantErrPart: "no content",
-		},
-		{
-			name:        "whitespace only",
-			message:     models.OutboundMessage{UUID: "u", TextContent: "   ", Meta: json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`)},
-			wantErrPart: "no content",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			inb := testInbox(t, nil, nil)
-			err := inb.Send(tc.message)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrPart) {
-				t.Fatalf("expected %q, got %v", tc.wantErrPart, err)
-			}
-		})
-	}
-}
-
-// Meta accepted the message, so the id has to be stored even though the update itself failed.
-func TestSendKeepsGoingWhenSourceIDUpdateFails(t *testing.T) {
-	updater := &fakeSourceUpdater{err: errors.New("db down")}
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		writeSendResponse(w, "wamid.OUT5")
-	}, updater)
-	err := inb.Send(models.OutboundMessage{UUID: "u", TextContent: "hi", Meta: json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`)})
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	if updater.calls != 1 {
-		t.Fatalf("expected one update attempt, got %d", updater.calls)
-	}
-}
-
-func TestSendWithoutSourceUpdater(t *testing.T) {
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		writeSendResponse(w, "wamid.OUT6")
-	}, nil)
-	if err := inb.Send(models.OutboundMessage{UUID: "u", TextContent: "hi", Meta: json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`)}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-}
-
-func TestSendSurfacesMetaError(t *testing.T) {
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(400)
-		w.Write([]byte(`{"error":{"message":"outside window","code":131047,"error_user_msg":"more than 24 hours"}}`))
-	}, &fakeSourceUpdater{})
-	err := inb.Send(models.OutboundMessage{UUID: "u", TextContent: "hi", Meta: json.RawMessage(`{"whatsapp":{"to_phone":"91"}}`)})
-	if err == nil || !strings.Contains(err.Error(), "more than 24 hours") {
-		t.Fatalf("expected the Meta user message, got %v", err)
-	}
-}
-
-func TestHumanBytes(t *testing.T) {
-	tests := map[int]string{
-		512:              "512 B",
-		2048:             "2 KB",
-		5 * 1024 * 1024:  "5.0 MB",
-		16 * 1024 * 1024: "16.0 MB",
-	}
-	for size, want := range tests {
-		if got := humanBytes(size); got != want {
-			t.Errorf("%d: expected %q, got %q", size, want, got)
-		}
-	}
-}
-
-func TestMaxMediaBytes(t *testing.T) {
-	if maxMediaBytes("audio") != effectiveLimit(maxAudioBytes) {
-		t.Fatal("audio must use the audio cap")
-	}
-	if maxMediaBytes("sticker") != effectiveLimit(maxDocumentBytes) {
-		t.Fatal("an unknown media type must fall back to the document cap")
-	}
-}
-
-func TestRejectMediaReason(t *testing.T) {
-	tests := []struct {
-		name        string
-		file        string
-		contentType string
-		size        int
-		wantMatch   string
-	}{
-		{"pdf under cap", "invoice.pdf", "application/pdf", 1024, ""},
-		{"jpeg under cap", "photo.jpg", "image/jpeg", 1024, ""},
-		{"jpeg with charset parameter", "photo.jpg", "image/jpeg; charset=binary", 1024, ""},
-		{"uppercase mime", "photo.jpg", "IMAGE/JPEG", 1024, ""},
-		{"webp", "sticker.webp", "image/webp", 1024, "WebP"},
-		{"zip", "logs.zip", "application/zip", 1024, "unsupported type"},
-		{"oversized image", "big.jpg", "image/jpeg", 6 * 1024 * 1024, "image limit"},
-		{"oversized video", "big.mp4", "video/mp4", 20 * 1024 * 1024, "video limit"},
-		{"oversized document", "big.pdf", "application/pdf", 101 * 1024 * 1024, "document limit"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := RejectMediaReason(tc.file, tc.contentType, tc.size)
-			if tc.wantMatch == "" {
-				if got != "" {
-					t.Fatalf("expected the file to be accepted, got %q", got)
-				}
-				return
-			}
-			if !strings.Contains(got, tc.wantMatch) {
-				t.Fatalf("expected reason to mention %q, got %q", tc.wantMatch, got)
-			}
-		})
-	}
-}
-
-// An image just under Meta's cap must pass while the 2% headroom keeps one at the cap out.
-func TestRejectMediaReasonImageBoundary(t *testing.T) {
-	if got := RejectMediaReason("photo.jpg", "image/jpeg", effectiveLimit(maxImageBytes)); got != "" {
-		t.Fatalf("expected the file at the effective limit to be accepted, got %q", got)
-	}
-	if got := RejectMediaReason("photo.jpg", "image/jpeg", maxImageBytes); got == "" {
-		t.Fatal("expected a file at Meta's hard cap to be rejected by the headroom")
-	}
-}
-
-func TestMediaTypeForAttachment(t *testing.T) {
-	tests := map[string]string{
-		"image/jpeg":       "image",
-		"image/png":        "image",
-		"video/mp4":        "video",
-		"video/3gpp":       "video",
-		"audio/ogg":        "audio",
-		"audio/mpeg":       "audio",
-		"application/pdf":  "document",
-		"text/plain":       "document",
-		"application/zip":  "document",
-		"IMAGE/PNG ":       "image",
-		"image/png; x=y":   "image",
-		"application/json": "document",
-	}
-	for contentType, want := range tests {
-		if got := mediaTypeForAttachment(attachment.Attachment{ContentType: contentType}); got != want {
-			t.Errorf("%s: expected %s, got %s", contentType, want, got)
-		}
-	}
-}
-
-func TestSupportsCaption(t *testing.T) {
-	if SupportsCaption("audio/ogg") {
-		t.Fatal("audio must not advertise caption support")
-	}
-	for _, contentType := range []string{"image/jpeg", "video/mp4", "application/pdf"} {
-		if !SupportsCaption(contentType) {
-			t.Errorf("%s should support a caption", contentType)
-		}
-	}
-}
-
-func TestParseSendMeta(t *testing.T) {
-	t.Run("envelope key wins", func(t *testing.T) {
-		meta, err := parseSendMeta(json.RawMessage(`{"to":["a@b.c"],"whatsapp":{"to_phone":"919876543210","template_name":"order_update"}}`))
-		if err != nil {
-			t.Fatalf("parse: %v", err)
-		}
-		if meta.ToPhone != "919876543210" || meta.TemplateName != "order_update" {
-			t.Fatalf("unexpected meta: %+v", meta)
-		}
-	})
-
-	t.Run("flat payload", func(t *testing.T) {
-		meta, err := parseSendMeta(json.RawMessage(`{"to_phone":"919876543210"}`))
-		if err != nil {
-			t.Fatalf("parse: %v", err)
-		}
-		if meta.ToPhone != "919876543210" {
-			t.Fatalf("unexpected meta: %+v", meta)
-		}
-	})
-
-	t.Run("empty meta", func(t *testing.T) {
-		meta, err := parseSendMeta(nil)
-		if err != nil {
-			t.Fatalf("parse: %v", err)
-		}
-		if meta.ToPhone != "" {
-			t.Fatalf("expected a zero meta, got %+v", meta)
-		}
-	})
-
-	t.Run("malformed meta", func(t *testing.T) {
-		if _, err := parseSendMeta(json.RawMessage(`not json`)); err == nil {
-			t.Fatal("expected an error for malformed meta")
-		}
-	})
-}
-
-func TestTextBody(t *testing.T) {
-	if got := textBody(models.OutboundMessage{ContentType: models.ContentTypeText, TextContent: "plain", Content: "plain"}); got != "plain" {
-		t.Fatalf("expected the stored text content, got %q", got)
-	}
-	// The stored text content is flattened. HTML replies must be re-rendered so WhatsApp formatting survives.
-	got := textBody(models.OutboundMessage{ContentType: models.ContentTypeHTML, Content: "<p>hello <b>there</b></p><ul><li><p>one</p></li></ul>", TextContent: "hello there\n\none"})
-	if got != "hello *there*\n\n- one" {
-		t.Fatalf("expected WhatsApp formatting, got %q", got)
-	}
-	if got := textBody(models.OutboundMessage{ContentType: models.ContentTypeHTML, Content: "<p>hi</p>"}); got != "hi" {
-		t.Fatalf("expected flattened HTML, got %q", got)
-	}
-}
-
-func testInbox(t *testing.T, handler http.HandlerFunc, updater SourceIDUpdater) *WhatsApp {
-	t.Helper()
-	if handler == nil {
-		handler = func(w http.ResponseWriter, r *http.Request) { writeSendResponse(w, "wamid.DEFAULT") }
-	}
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-
-	client := whatsapp.New(testLogger())
-	client.SetBaseURL(srv.URL)
-
-	inb, err := New(nil, Opts{
-		ID:            7,
-		Name:          "WA Inbox",
-		Config:        Config{PhoneNumberID: "PN1", WABAID: "WABA1", AccessToken: "TOKEN", APIVersion: "v26.0"},
-		Client:        client,
-		Lo:            testLogger(),
-		SourceUpdater: updater,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return inb
-}
-
-func testLogger() *logf.Logger {
-	l := logf.New(logf.Opts{Level: logf.FatalLevel})
-	return &l
-}
-
-func writeJSONBody(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
-}
-
-func writeSendResponse(w http.ResponseWriter, id string) {
-	writeJSONBody(w, map[string]any{
-		"messaging_product": "whatsapp",
-		"messages":          []map[string]string{{"id": id}},
-	})
-}
-
-func decodeBody(t *testing.T, r *http.Request, out any) {
-	t.Helper()
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		t.Fatalf("unmarshal %q: %v", raw, err)
+	if err := w.Receive(context.Background()); err != nil || w.Close() != nil {
+		t.Fatal("receive/close must be no-ops")
 	}
 }
 
 type fakeSourceUpdater struct {
-	uuid     string
-	sourceID string
-	calls    int
-	err      error
+	uuid, sourceID string
+	err            error
 }
 
-func (f *fakeSourceUpdater) UpdateMessageSourceID(messageUUID, sourceID string) error {
-	f.calls++
-	f.uuid, f.sourceID = messageUUID, sourceID
+func (f *fakeSourceUpdater) UpdateMessageSourceID(uuid, sourceID string) error {
+	f.uuid, f.sourceID = uuid, sourceID
 	return f.err
 }
 
-func TestSendRetriesWhenMetaRefuses(t *testing.T) {
-	var attempts int32
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&attempts, 1) < 3 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":{"message":"rate limit","code":130429}}`))
-			return
-		}
-		writeSendResponse(w, "wamid.AFTER_RETRY")
-	}, nil)
-	inb.retryBackoff = time.Millisecond
+func TestSendText(t *testing.T) {
+	var gotPath, gotDevice, gotUser, gotPass string
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotDevice = r.Header.Get("X-Device-Id")
+		gotUser, gotPass, _ = r.BasicAuth()
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		_, _ = w.Write([]byte(`{"code":"SUCCESS","message":"ok","results":{"message_id":"wamid.out"}}`))
+	}))
+	defer server.Close()
 
-	if err := inb.Send(textMessage("hello")); err != nil {
-		t.Fatalf("a 429 must be retried, not failed: %v", err)
+	updater := &fakeSourceUpdater{}
+	w, err := New(nil, Opts{ID: 1, Client: testClient(t, server.URL), Lo: testLogger(), SourceUpdater: updater})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := atomic.LoadInt32(&attempts); got != 3 {
-		t.Fatalf("expected three attempts, got %d", got)
+	err = w.Send(models.OutboundMessage{
+		UUID:        "msg-1",
+		Content:     "Hello",
+		ContentType: models.ContentTypeText,
+		Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"628111"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/send/message" || gotDevice != "dev-1" || gotUser != "u" || gotPass != "p" {
+		t.Fatalf("unexpected request: path=%s device=%s auth=%s:%s", gotPath, gotDevice, gotUser, gotPass)
+	}
+	if payload["phone"] != "628111" || payload["message"] != "Hello" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if updater.uuid != "msg-1" || updater.sourceID != "wamid.out" {
+		t.Fatalf("source id not persisted: %+v", updater)
 	}
 }
 
-func TestSendDoesNotRetryAPermanentRejection(t *testing.T) {
-	var attempts int32
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":{"message":"bad recipient","code":131000}}`))
-	}, nil)
-	inb.retryBackoff = time.Millisecond
-
-	if err := inb.Send(textMessage("hello")); err == nil {
-		t.Fatal("expected a permanent rejection to surface")
+func TestSendReplyCarriesReplyID(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		_, _ = w.Write([]byte(`{"code":"SUCCESS","results":{"message_id":"x"}}`))
+	}))
+	defer server.Close()
+	w, _ := New(nil, Opts{Client: testClient(t, server.URL), Lo: testLogger()})
+	err := w.Send(models.OutboundMessage{
+		Content: "Hi", ContentType: models.ContentTypeText,
+		Meta: json.RawMessage(`{"whatsapp":{"to_phone":"628111","reply_to_wa_message_id":"in-1"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := atomic.LoadInt32(&attempts); got != 1 {
-		t.Fatalf("a permanent rejection must be attempted once, got %d attempts", got)
+	if payload["reply_message_id"] != "in-1" {
+		t.Fatalf("reply id missing: %+v", payload)
 	}
 }
 
-// Meta may have accepted the message before the connection dropped, so a retry would send it twice.
-func TestSendDoesNotRetryATransportFailure(t *testing.T) {
-	var attempts int32
-	inb := testInbox(t, func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			t.Error("expected a hijackable response")
-			return
-		}
-		conn, _, err := hj.Hijack()
+func TestSendAttachment(t *testing.T) {
+	var gotPath, gotField, gotCaption, gotFilename string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		f, header, err := r.FormFile("image")
 		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
+			t.Fatalf("reading multipart: %v", err)
 		}
-		conn.Close()
-	}, nil)
-	inb.retryBackoff = time.Millisecond
+		defer f.Close()
+		body, _ := io.ReadAll(f)
+		gotField = string(body)
+		gotCaption = r.FormValue("caption")
+		gotFilename = header.Filename
+		_, _ = w.Write([]byte(`{"code":"SUCCESS","results":{"message_id":"wamid.media"}}`))
+	}))
+	defer server.Close()
 
-	if err := inb.Send(textMessage("hello")); err == nil {
-		t.Fatal("expected the transport failure to surface")
+	w, _ := New(nil, Opts{Client: testClient(t, server.URL), Lo: testLogger()})
+	err := w.Send(models.OutboundMessage{
+		Content:     "Look",
+		ContentType: models.ContentTypeText,
+		Attachments: attachment.Attachments{{Name: "photo.jpg", ContentType: "image/jpeg", Content: []byte("image-bytes"), Size: 11}},
+		Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"628111"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := atomic.LoadInt32(&attempts); got != 1 {
-		t.Fatalf("a dropped connection may already have been accepted by Meta. Expected one attempt, got %d", got)
+	if gotPath != "/send/image" || gotField != "image-bytes" || gotCaption != "Look" || gotFilename != "photo.jpg" {
+		t.Fatalf("unexpected media request: path=%s body=%s caption=%s filename=%s", gotPath, gotField, gotCaption, gotFilename)
 	}
 }
 
-func textMessage(body string) models.OutboundMessage {
-	return models.OutboundMessage{
-		UUID:        "msg-uuid",
-		Content:     body,
-		ContentType: models.ContentTypeHTML,
-		Meta:        json.RawMessage(`{"whatsapp":{"to_phone":"919876543210"}}`),
+func TestSendRejectsUnusableMessages(t *testing.T) {
+	w, _ := New(nil, Opts{Client: testClient(t, "https://wago.example.com"), Lo: testLogger()})
+	tests := []struct {
+		name string
+		msg  models.OutboundMessage
+	}{
+		{"no content", models.OutboundMessage{Meta: json.RawMessage(`{"whatsapp":{"to_phone":"1"}}`)}},
+		{"no recipient", models.OutboundMessage{Content: "hi", ContentType: models.ContentTypeText}},
+		{"many attachments", models.OutboundMessage{
+			Meta: json.RawMessage(`{"whatsapp":{"to_phone":"1"}}`),
+			Attachments: attachment.Attachments{
+				{Name: "a", ContentType: "image/png", Content: []byte("a")},
+				{Name: "b", ContentType: "image/png", Content: []byte("b")},
+			},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := w.Send(tc.msg); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}
+
+func TestSendRetriesWhenWagoRefuses(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"code":"INTERNAL_SERVER_ERROR","message":"busy"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":"SUCCESS","results":{"message_id":"ok"}}`))
+	}))
+	defer server.Close()
+	w, _ := New(nil, Opts{Client: testClient(t, server.URL), Lo: testLogger()})
+	w.retryBackoff = time.Millisecond
+	err := w.Send(models.OutboundMessage{Content: "hi", ContentType: models.ContentTypeText, Meta: json.RawMessage(`{"whatsapp":{"to_phone":"1"}}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts.Load())
+	}
+}
+
+func TestSendSurfacesPermanentWagoError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":"INVALID_REQUEST","message":"bad phone"}`))
+	}))
+	defer server.Close()
+	w, _ := New(nil, Opts{Client: testClient(t, server.URL), Lo: testLogger()})
+	err := w.Send(models.OutboundMessage{Content: "hi", ContentType: models.ContentTypeText, Meta: json.RawMessage(`{"whatsapp":{"to_phone":"1"}}`)})
+	if err == nil || !strings.Contains(err.Error(), "bad phone") {
+		t.Fatalf("expected the WAGO error, got %v", err)
+	}
+}
+
+func TestMediaKind(t *testing.T) {
+	cases := map[string]string{
+		"image/jpeg": "image", "image/webp": "image",
+		"video/mp4": "video", "audio/ogg": "audio",
+		"application/pdf": "file", "": "file",
+	}
+	for mime, want := range cases {
+		if got := mediaKind(attachment.Attachment{ContentType: mime}); got != want {
+			t.Errorf("%s: expected %s, got %s", mime, want, got)
+		}
+	}
+}
+
+func TestRejectMediaReason(t *testing.T) {
+	if got := RejectMediaReason("a.pdf", "application/pdf", 1024); got != "" {
+		t.Fatalf("expected a small PDF to pass, got %q", got)
+	}
+	if got := RejectMediaReason("big.pdf", "application/pdf", maxDocumentBytes); !strings.Contains(got, "exceeds") {
+		t.Fatalf("expected a size rejection, got %q", got)
+	}
+}
+
+func TestParseSendMeta(t *testing.T) {
+	for _, raw := range []string{
+		`{"whatsapp":{"to_phone":"1","reply_to_wa_message_id":"2"}}`,
+		`{"to_phone":"1","reply_to_wa_message_id":"2"}`,
+	} {
+		meta, err := parseSendMeta(json.RawMessage(raw))
+		if err != nil || meta.ToPhone != "1" || meta.ReplyToWAMessageID != "2" {
+			t.Fatalf("%s: unexpected meta %+v, err %v", raw, meta, err)
+		}
+	}
+}
+
+func TestTextBody(t *testing.T) {
+	if got := textBody(models.OutboundMessage{ContentType: models.ContentTypeHTML, Content: "<p>Hello <b>there</b></p>"}); got != "Hello *there*" {
+		t.Fatalf("unexpected HTML rendering: %q", got)
+	}
+	if got := textBody(models.OutboundMessage{TextContent: "plain"}); got != "plain" {
+		t.Fatalf("unexpected text body: %q", got)
 	}
 }

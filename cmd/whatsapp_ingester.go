@@ -9,7 +9,7 @@ import (
 
 	whatsappChannel "github.com/abhinavxd/libredesk/internal/inbox/channel/whatsapp"
 	"github.com/abhinavxd/libredesk/internal/streamqueue"
-	"github.com/abhinavxd/libredesk/internal/whatsapp"
+	"github.com/abhinavxd/libredesk/internal/wago"
 )
 
 const (
@@ -96,7 +96,7 @@ func (i *WhatsAppIngester) handle(app *App) streamqueue.Handler {
 			app.lo.Error("error decoding whatsapp stream job, dropping", "error", err)
 			return nil
 		}
-		parsed, err := whatsapp.ParsePayload(job.Body)
+		parsed, err := wago.ParsePayload(job.Body)
 		if err != nil {
 			app.lo.Error("error parsing whatsapp webhook payload from stream, dropping", "inbox_id", job.InboxID, "error", err)
 			return nil
